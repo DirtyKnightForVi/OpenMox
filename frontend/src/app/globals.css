@@ -1,36 +1,108 @@
 @import "tailwindcss";
 
+/* ─── Tailwind v4: class-based dark mode (for next-themes) ─── */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
+  /* Brand accent — Emerald-based, used for primary UI actions */
   --color-accent: #0a7c5b;
+  --color-accent-hover: #03694c;
   --color-accent-soft: #ecfdf5;
+  --color-accent-ring: rgba(10, 124, 91, 0.25);
+
+  /* Surfaces */
   --color-surface: #ffffff;
+  --color-surface-secondary: #f8fafc;
+  --color-surface-tertiary: #f1f5f9;
   --color-muted: #f8fafc;
+
+  /* Borders */
   --color-border: #e2e8f0;
+  --color-border-light: #f1f5f9;
+
+  /* Text */
   --color-text-primary: #0f172a;
   --color-text-secondary: #64748b;
   --color-text-muted: #94a3b8;
+
+  /* Agent backgrounds (light) */
   --color-bg-agent-momo: #dbeafe;
   --color-bg-agent-pd: #fef3c7;
   --color-bg-agent-dev: #e0e7ff;
   --color-bg-agent-arch: #fce7f3;
-  --color-bubble-user: #f1f5f9;
+
+  /* Chat bubbles */
+  --color-bubble-user: #0a7c5b;
   --color-bubble-agent: #ffffff;
+
+  /* Status */
   --color-status-done: #10b981;
   --color-status-progress: #f59e0b;
   --color-status-blocked: #ef4444;
   --color-status-pending: #94a3b8;
+
+  /* Misc */
+  --color-overlay: rgba(0, 0, 0, 0.15);
+
+  /* Typography */
   --font-sans: "Geist", "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, monospace;
 }
 
+/* ─── Dark mode overrides ─── */
+.dark {
+  --color-accent: #22c55e;
+  --color-accent-hover: #16a34a;
+  --color-accent-soft: #052e16;
+  --color-accent-ring: rgba(34, 197, 94, 0.3);
+
+  --color-surface: #0a0a0f;
+  --color-surface-secondary: #12121a;
+  --color-surface-tertiary: #1a1a2a;
+  --color-muted: #12121a;
+
+  --color-border: #1e1e30;
+  --color-border-light: #16162a;
+
+  --color-text-primary: #e4e4ed;
+  --color-text-secondary: #9494a8;
+  --color-text-muted: #64647a;
+
+  --color-bg-agent-momo: #1e3a5f;
+  --color-bg-agent-pd: #5f4a1e;
+  --color-bg-agent-dev: #2a1e5f;
+  --color-bg-agent-arch: #5f1e3a;
+
+  --color-bubble-agent: #12121a;
+  --color-overlay: rgba(0, 0, 0, 0.5);
+}
+
 @layer base {
   body {
-    @apply bg-muted text-text-primary antialiased;
+    @apply bg-surface-secondary text-text-primary antialiased;
+    font-family: var(--font-sans);
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 3px;
+  }
+  .dark ::-webkit-scrollbar-thumb {
+    background: #2a2a3a;
   }
 }
 
+/* ─── Utility classes ─── */
 @utility sidebar-panel {
-  @apply bg-white border-l border-border overflow-y-auto;
+  @apply bg-surface border-l border-border overflow-y-auto;
 }
 
 @utility bubble {
@@ -38,9 +110,32 @@
 }
 
 @utility bubble-user {
-  @apply bubble bg-bubble-user;
+  @apply bubble bg-bubble-user text-white border-transparent;
 }
 
 @utility bubble-agent {
   @apply bubble bg-bubble-agent shadow-xs;
+}
+
+@utility skeleton {
+  @apply bg-surface-tertiary rounded animate-pulse;
+}
+
+/* Simple CSS animations for Dialog/Toast */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes slide-in-right {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@utility animate-in {
+  animation: fade-in 0.2s ease-out;
+}
+@utility fade-in {
+  animation: fade-in 0.2s ease-out;
+}
+@utility slide-in-right {
+  animation: slide-in-right 0.3s ease-out;
 }

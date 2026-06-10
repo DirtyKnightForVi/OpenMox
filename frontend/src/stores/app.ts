@@ -28,6 +28,7 @@ interface AppState {
   setTemplates: (templates: { id: string; name: string; description: string; skills_count: number }[]) => void;
   addMessage: (msg: ChatMessage) => void;
   appendToLastMessage: (agentId: string, delta: string) => void;
+  appendThinkingToLastMessage: (agentId: string, delta: string) => void;
   setStreaming: (v: boolean) => void;
   setTasks: (tasks: Task[]) => void;
   setMemories: (memories: MemoryEntry[]) => void;
@@ -57,6 +58,15 @@ export const useAppStore = create<AppState>((set) => ({
       const last = msgs[msgs.length - 1];
       if (last && last.sender === agentId) {
         msgs[msgs.length - 1] = { ...last, text: last.text + delta };
+      }
+      return { messages: msgs };
+    }),
+  appendThinkingToLastMessage: (agentId, delta) =>
+    set((s) => {
+      const msgs = [...s.messages];
+      const last = msgs[msgs.length - 1];
+      if (last && last.sender === agentId) {
+        msgs[msgs.length - 1] = { ...last, thinkingText: (last.thinkingText || "") + delta };
       }
       return { messages: msgs };
     }),

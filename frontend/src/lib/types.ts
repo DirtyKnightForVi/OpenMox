@@ -73,6 +73,7 @@ export interface ChatMessage {
   id: string;
   sender: "user" | string;
   text: string;
+  thinkingText?: string;
   timestamp: number;
   events: ChatStreamEvent[];
 }
