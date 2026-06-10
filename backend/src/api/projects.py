@@ -35,11 +35,11 @@ async def api_create_project(request: Request):
     try:
         body = await request.json()
     except Exception:
-        return {"ok": False, "error": "Invalid JSON body"}
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     path = body.get("path", "")
     if not path:
-        return {"ok": False, "error": "path is required"}
+        raise HTTPException(status_code=400, detail="path is required")
 
     name = body.get("name", os.path.basename(path) or "new-project")
     display_name = body.get("display_name") or body.get("displayName") or name

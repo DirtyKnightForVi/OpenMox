@@ -13,6 +13,7 @@ from .config import router as config_router
 from .schedules import router as schedules_router
 from .dashboard import router as dashboard_router
 from .memory import router as memory_router
+from .fs import router as fs_router
 
 
 def register_routers(app: FastAPI) -> None:
@@ -28,3 +29,4 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(schedules_router)
     app.include_router(dashboard_router)
     app.include_router(memory_router)
+    app.include_router(fs_router)

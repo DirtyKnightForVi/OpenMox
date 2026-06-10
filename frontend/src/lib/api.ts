@@ -25,7 +25,7 @@ export async function listProjects() {
 }
 
 export async function createProject(name: string, path: string, display_name?: string) {
-  return fetchAPI<{ ok: boolean }>("/projects/create", {
+  return fetchAPI<{ id: number; name: string; full_path: string; display_name?: string }>("/projects/create", {
     method: "POST",
     body: JSON.stringify({ name, path, display_name }),
   });

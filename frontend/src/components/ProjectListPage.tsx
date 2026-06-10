@@ -1,6 +1,6 @@
 "use client";
 
-import { Folder, Clock, Users, ArrowRight, Plus } from "@phosphor-icons/react";
+import { Folder, Clock, Users, ArrowRight, Plus, FolderOpen } from "@phosphor-icons/react";
 import { useAppStore } from "@/stores/app";
 import { listProjects, createProject } from "@/lib/api";
 import { useEffect, useState } from "react";
@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Dialog } from "@/components/ui/Dialog";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
+import { PathPicker } from "@/components/PathPicker";
 
 export default function ProjectListPage() {
   const router = useRouter();
@@ -16,6 +17,7 @@ export default function ProjectListPage() {
   const [showNew, setShowNew] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPath, setNewPath] = useState("");
+  const [showPicker, setShowPicker] = useState(false);
 
   useEffect(() => {
     listProjects().then(setProjects).catch(console.warn);
@@ -24,11 +26,7 @@ export default function ProjectListPage() {
   const handleCreate = async () => {
     if (!newName || !newPath) return;
     try {
-      const result = await createProject(newName, newPath);
-      if (!result.ok) {
-        console.warn("Project creation returned unexpected failure", result);
-        // result.ok=false with HTTP 200 only if backend changes; keep for safety
-      }
+      await createProject(newName, newPath);
       const updated = await listProjects();
       setProjects(updated);
       setShowNew(false);
@@ -107,12 +105,25 @@ export default function ProjectListPage() {
           onChange={(e) => setNewName(e.target.value)}
         />
         <div className="mt-3">
-          <Input
-            label="Full Path"
-            placeholder="/home/user/projects/my-app"
-            value={newPath}
-            onChange={(e) => setNewPath(e.target.value)}
-          />
+          <div className="flex items-end gap-2">
+            <div className="flex-1">
+              <Input
+                label="Full Path"
+                placeholder="/tmp/my-project"
+                value={newPath}
+                onChange={(e) => setNewPath(e.target.value)}
+              />
+            </div>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setShowPicker(true)}
+              className="mb-0"
+            >
+              <FolderOpen size={14} />
+              Browse
+            </Button>
+          </div>
         </div>
         <div className="flex justify-end gap-2 mt-5">
           <Button variant="secondary" onClick={() => setShowNew(false)}>
@@ -123,6 +134,13 @@ export default function ProjectListPage() {
           </Button>
         </div>
       </Dialog>
+
+      <PathPicker
+        open={showPicker}
+        onClose={() => setShowPicker(false)}
+        onSelect={(path) => { setNewPath(path); setShowPicker(false); }}
+        initialPath={newPath || "/tmp"}
+      />
     </div>
   );
 }
