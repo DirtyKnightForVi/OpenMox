@@ -7,7 +7,14 @@ async function fetchAPI<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...init?.headers },
     ...init,
   });
-  if (!res.ok) throw new Error(`API ${path}: ${res.status}`);
+  if (!res.ok) {
+    let detail = `API ${path}: ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body.detail) detail = body.detail;
+    } catch {}
+    throw new Error(detail);
+  }
   return res.json();
 }
 

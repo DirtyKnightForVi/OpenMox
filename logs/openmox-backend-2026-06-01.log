@@ -1,4 +1,0 @@
-2026-06-01 22:19:11 INFO  [-][core][setup_logging] Logging initialized — file: /home/yangjy/桌面/Data Agents/Project/OpenMox/OpenMox-Plan-C/logs/openmox-backend-2026-06-01.log
-2026-06-01 22:19:11 WARNING [-][main][<module>] Frontend dist/ not found at /home/yangjy/桌面/Data Agents/Project/OpenMox/OpenMox-Plan-C/frontend/dist
-2026-06-01 22:19:11 WARNING [-][main][<module>] DEEPSEEK_API_KEY not set — agent replies will fail
-2026-06-01 22:19:11 INFO  [-][main][<module>] Ready — http://localhost:8000

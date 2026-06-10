@@ -11,7 +11,7 @@ Endpoints:
 
 import os
 from pathlib import Path
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from ..core.store import list_projects, create_project, delete_project
 from ..core.logging import get_logger
@@ -52,7 +52,10 @@ async def api_create_project(request: Request):
             (root / d).mkdir(parents=True, exist_ok=True)
     except Exception as exc:
         log.error("Failed to init project dir %s: %s", path, exc)
-        return {"ok": False, "error": f"Cannot create project directory: {exc}"}
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot create project directory: {exc}",
+        )
 
     project = await create_project(name, path, display_name)
     log.info("Project created: %s at %s", name, path)
@@ -81,7 +84,10 @@ async def api_create_workspace(request: Request):
             (root / d).mkdir(parents=True, exist_ok=True)
     except Exception as exc:
         log.error("Failed to init project dir %s: %s", path, exc)
-        return {"ok": False, "error": f"Cannot create project directory: {exc}"}
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot create project directory: {exc}",
+        )
 
     project = await create_project(name, path, display_name)
     return project

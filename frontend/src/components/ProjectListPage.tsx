@@ -23,12 +23,21 @@ export default function ProjectListPage() {
 
   const handleCreate = async () => {
     if (!newName || !newPath) return;
-    await createProject(newName, newPath);
-    const updated = await listProjects();
-    setProjects(updated);
-    setShowNew(false);
-    setNewName("");
-    setNewPath("");
+    try {
+      const result = await createProject(newName, newPath);
+      if (!result.ok) {
+        console.warn("Project creation returned unexpected failure", result);
+        // result.ok=false with HTTP 200 only if backend changes; keep for safety
+      }
+      const updated = await listProjects();
+      setProjects(updated);
+      setShowNew(false);
+      setNewName("");
+      setNewPath("");
+    } catch (e) {
+      console.error("Failed to create project:", e);
+      alert(e instanceof Error ? e.message : "Failed to create project");
+    }
   };
 
   return (
