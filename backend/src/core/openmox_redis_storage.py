@@ -122,6 +122,40 @@ class OpenMoxRedisStorage(RedisStorage):
         dao = self._ensure_dao()
         return dao.delete_agent(agent_id)
 
+    async def ensure_agent_from_path(
+        self, user_id: str, agent_id: str, project_path: str,
+    ) -> bool:
+        """Look up an agent from a project directory and register it in Redis.
+
+        The singleton storage is initialised with a fixed ``project_root``
+        (the monorepo root).  When a WebSocket chat handler needs to run
+        an agent from a **different** project, it calls this method first
+        to sync the agent into Redis — otherwise
+        :meth:`ChatService._run_impl` won't find it.
+
+        Uses :class:`ConfigDAO` with ``project_path``, builds an
+        ``AgentRecord``, and stores it directly in Redis (bypassing the
+        ConfigDAO-backed :meth:`upsert_agent` override).
+
+        Args:
+            user_id: Always ``"openmox"``.
+            agent_id: e.g. ``"momo"``.
+            project_path: Absolute path to the project root.
+
+        Returns:
+            ``True`` if the agent was found and registered.
+        """
+        from ..dao import ConfigDAO
+        dao = ConfigDAO(project_path)
+        cfg = dao.get_agent(agent_id)
+        if not cfg:
+            return False
+        record = self._agent_to_record(cfg)
+        # Store directly in Redis — skip OpenMoxRedisStorage.upsert_agent
+        # which would delegate back to the wrong ConfigDAO.
+        await RedisStorage.upsert_agent(self, user_id, record)
+        return True
+
     # ═══════════════════════════════════════════════════
     # Credential — built from environment (DeepSeek)
     # ═══════════════════════════════════════════════════

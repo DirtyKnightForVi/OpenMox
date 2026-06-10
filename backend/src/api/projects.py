@@ -22,6 +22,38 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["projects"])
 
 
+def _init_momo_if_needed(project_path: str) -> None:
+    """Create a default momo agent in a freshly scaffolded project.
+
+    Called right after :func:`api_create_project` has created the
+    ``.Agents/`` and ``.Project/`` directories.  Uses the first
+    available agent template and marks it as momo.  Idempotent —
+    does nothing if momo already exists.
+    """
+    dao = ConfigDAO(project_path)
+    if dao.get_momo_id():
+        return  # already initialised
+
+    templates = ConfigDAO.list_templates()
+    if not templates:
+        log.warning("No agent templates found — skipping momo init for %s", project_path)
+        return
+
+    template_id = templates[0].id
+    try:
+        cfg = dao.create_agent(
+            agent_id="momo",
+            template_id=template_id,
+            name="momo",
+        )
+        log.info(
+            "Project %s: auto-created momo agent from template %s",
+            project_path, template_id,
+        )
+    except Exception as exc:
+        log.warning("Failed to auto-create momo for %s: %s", project_path, exc)
+
+
 @router.get("/projects")
 async def api_list_projects():
     """Return all projects as a flat array (PilotDeck compat)."""
@@ -56,6 +88,9 @@ async def api_create_project(request: Request):
             status_code=400,
             detail=f"Cannot create project directory: {exc}",
         )
+
+    # Auto-create the momo agent so the user can chat immediately.
+    _init_momo_if_needed(path)
 
     project = await create_project(name, path, display_name)
     log.info("Project created: %s at %s", name, path)

@@ -174,6 +174,23 @@ async def _handle_command(
         if momo_id:
             mentioned = [momo_id]
             log.info("No @mention → defaulting to momo (%s)", momo_id)
+            # Register the project-scoped agent into Redis so ChatService
+            # (which uses the singleton storage) can find it later.
+            try:
+                ok = await storage.ensure_agent_from_path(
+                    user_id, momo_id, project_path,
+                )
+                if not ok:
+                    log.warning(
+                        "momo %r resolved from .Project/momo.yaml but "
+                        "not found in .Agents/ — agent not created yet?",
+                        momo_id,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "Failed to register momo %r from %s: %s",
+                    momo_id, project_path, exc,
+                )
         else:
             log.warning("No @mention and no momo configured — message dropped")
             await append_message(
