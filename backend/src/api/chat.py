@@ -74,7 +74,6 @@ async def handle_ws(ws: WebSocket) -> None:
     mention_router = MentionRouter()
     _registered_window: str | None = None
     _project_path: str = "."
-    _subscribe_task: asyncio.Task | None = None
 
     try:
         while True:
@@ -102,18 +101,9 @@ async def handle_ws(ws: WebSocket) -> None:
                     "projectPath", options.get("cwd", "."),
                 )
 
-                # Register ws + subscribe to window stream on first command.
-                # We do this AFTER getting window_id from the first message.
                 if _registered_window is None:
                     _registered_window = window_id
                     await ws_register(window_id, ws, _project_path)
-
-                    # Start background subscriber for window stream events
-                    _subscribe_task = asyncio.create_task(
-                        _subscribe_window_stream(ws, window_id),
-                        name=f"ws-sub:{window_id[:20]}",
-                    )
-
                     log.info(
                         "WS registered: window=%s project=%s",
                         window_id[:30], _project_path,
@@ -126,63 +116,14 @@ async def handle_ws(ws: WebSocket) -> None:
     except Exception as e:
         log.error("WebSocket error: %s", e)
     finally:
-        # Cancel the window stream subscriber
-        if _subscribe_task is not None:
-            _subscribe_task.cancel()
-            try:
-                await _subscribe_task
-            except asyncio.CancelledError:
-                pass
         if _registered_window is not None:
             await ws_unregister(_registered_window)
             log.info("WS unregistered: window=%s", _registered_window[:30])
 
 
-# ── Window stream subscriber (background task) ─────
+# ── Chain-trigger depth limit ───────────────────────
 
-
-async def _subscribe_window_stream(ws: WebSocket, window_id: str) -> None:
-    """Subscribe to the window stream and forward events to WebSocket.
-
-    This runs as a background task for the lifetime of the WebSocket.
-    When an agent's WindowPublishMiddleware publishes an event to the
-    window stream, it arrives here and is forwarded to the frontend.
-
-    Also replays recent history on subscription start.
-    """
-    try:
-        from agentscope.app import deps
-        # We need the message_bus from app.state
-        # Since we're outside a request context, we access it via the app
-        from main import app as _app
-        message_bus = getattr(_app.state, 'message_bus', None)
-        if message_bus is None:
-            # Fallback: try to access via lifespan-managed state
-            # message_bus lives in AsyncExitStack, not directly in app.state
-            log.warning("message_bus not in app.state — window stream unavailable")
-            return
-
-        key = _window_key(window_id)
-
-        # ── Replay recent history ──────────────────
-        try:
-            entries = await message_bus.log_read(key, max_count=100)
-            for _entry_id, payload in entries:
-                await _safe_send(ws, payload)
-        except Exception:
-            pass  # new window, no history
-
-        # ── Live subscription ──────────────────────
-        async for payload in message_bus.subscribe(key):
-            if payload:
-                await _safe_send(ws, payload)
-
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        log.debug("Window stream subscriber error: %s", e)
-
-
+_MAX_CHAIN_DEPTH = 5
 # ── Command handler ────────────────────────────────────
 
 
@@ -259,6 +200,8 @@ async def _handle_command(
             await message_bus.publish(key, human_event)
         except Exception:
             pass  # best-effort
+        # Also push directly to WebSocket for immediate UI feedback
+        await _safe_send(ws, human_event)
 
         # Persist to SQLite messages (audit)
         await append_message(
@@ -315,7 +258,7 @@ async def _handle_command(
                 role="user",
             )
 
-        # ── Run agent via ChatService, subscribe concurrently ──
+        # ── Run agent via ChatService, collect events → WS ──
         sub_ready = asyncio.Event()
         text_parts: list[str] = []
 
@@ -323,31 +266,28 @@ async def _handle_command(
             async for payload in message_bus.session_subscribe_events(
                 session_id, on_ready=sub_ready.set,
             ):
+                # Forward every event to WebSocket directly
+                await _safe_send(ws, payload)
                 if payload.get("type") == "TEXT_BLOCK_DELTA":
                     text_parts.append(payload.get("delta", ""))
                 elif payload.get("type") == "REPLY_END":
                     break
 
-        async def _run():
-            await sub_ready.wait()
-            log.info("_run_one: subscription ready, starting chat_service.run() for %s", agent_id)
-            await chat_service.run(
-                user_id=user_id,
-                session_id=session_id,
-                agent_id=agent_id,
-                input_msg=input_msg,
-            )
-            log.info("_run_one: chat_service.run() completed for %s", agent_id)
+        collector_task = asyncio.create_task(_collect())
+        await asyncio.wait_for(sub_ready.wait(), timeout=5.0)
+        await asyncio.sleep(0)  # let collector enter async-for
+
+        await chat_service.run(
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            input_msg=input_msg,
+        )
 
         try:
-            await asyncio.wait_for(
-                asyncio.gather(_collect(), _run()),
-                timeout=60.0,
-            )
-        except asyncio.TimeoutError:
-            log.warning("Agent %s: timed out after 60s", agent_id)
-        except Exception as e:
-            log.error("Agent %s: %s", agent_id, e)
+            await asyncio.wait_for(collector_task, timeout=10.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
 
         full_text = "".join(text_parts)
         return {"agent_id": agent_id, "text": full_text}
