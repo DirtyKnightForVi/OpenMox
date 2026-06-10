@@ -1,0 +1,11 @@
+# Python-generated files
+backend/__pycache__/
+backend/.venv/
+backend/data/
+backend/logs/
+backend/Agent_Sets/
+backend/skills/
+
+frontend/node_modules/
+frontend/build/ 
+frontend/.next/

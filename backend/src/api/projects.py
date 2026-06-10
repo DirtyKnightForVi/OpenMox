@@ -32,15 +32,29 @@ async def api_list_projects():
 @router.post("/projects/create")
 async def api_create_project(request: Request):
     """Create a project directory and persist to DB."""
-    body = await request.json()
-    path = body.get("path", body.get("fullPath", ""))
-    name = os.path.basename(path) or body.get("name", "new-project")
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": False, "error": "Invalid JSON body"}
+
+    path = body.get("path", "")
+    if not path:
+        return {"ok": False, "error": "path is required"}
+
+    name = body.get("name", os.path.basename(path) or "new-project")
+    display_name = body.get("display_name") or body.get("displayName") or name
 
     # Ensure disk directories + project scaffold
-    root = Path(path)
-    ConfigDAO.init_project(root)
+    try:
+        root = Path(path)
+        root.mkdir(parents=True, exist_ok=True)
+        for d in [".Agents", ".Project", ".Project/rules", ".Project/skills"]:
+            (root / d).mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        log.error("Failed to init project dir %s: %s", path, exc)
+        return {"ok": False, "error": f"Cannot create project directory: {exc}"}
 
-    project = await create_project(name, path, body.get("displayName", name))
+    project = await create_project(name, path, display_name)
     log.info("Project created: %s at %s", name, path)
     return project
 
@@ -48,14 +62,28 @@ async def api_create_project(request: Request):
 @router.post("/projects/create-workspace")
 async def api_create_workspace(request: Request):
     """Frontend ProjectCreationWizard calls this."""
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": False, "error": "Invalid JSON body"}
+
     path = body.get("path", "")
-    name = os.path.basename(path) or body.get("name", "new-workspace")
+    if not path:
+        return {"ok": False, "error": "path is required"}
 
-    root = Path(path)
-    ConfigDAO.init_project(root)
+    name = body.get("name", os.path.basename(path) or "new-workspace")
+    display_name = body.get("display_name") or body.get("displayName") or name
 
-    project = await create_project(name, path, body.get("displayName", name))
+    try:
+        root = Path(path)
+        root.mkdir(parents=True, exist_ok=True)
+        for d in [".Agents", ".Project", ".Project/rules", ".Project/skills"]:
+            (root / d).mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        log.error("Failed to init project dir %s: %s", path, exc)
+        return {"ok": False, "error": f"Cannot create project directory: {exc}"}
+
+    project = await create_project(name, path, display_name)
     return project
 
 
