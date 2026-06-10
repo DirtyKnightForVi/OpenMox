@@ -49,7 +49,7 @@ def setup_logging(level: int = logging.DEBUG) -> None:
     log_dir = Path(os.environ.get("OPENMOX_LOG_DIR", "logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
     # single-file mode — use a WatchedFileHandler so logrotate-friendly
-    log_path = log_dir / "openmox.log"
+    log_path = log_dir / "openmox-backend.log"
     try:
         fh = logging.FileHandler(str(log_path), encoding="utf-8")
         fh.setFormatter(fmt)

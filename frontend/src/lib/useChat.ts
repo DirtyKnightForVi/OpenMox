@@ -158,6 +158,18 @@ export function useChat() {
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING)
       return;
+
+    // Mute callbacks on the previous WebSocket so that its async events
+    // (onclose / onerror) cannot interfere with the new connection.
+    // This is essential in React StrictMode where the cleanup-effect
+    // cycle closes one socket right before the next connect() call.
+    if (wsRef.current) {
+      wsRef.current.onopen = null;
+      wsRef.current.onclose = null;
+      wsRef.current.onerror = null;
+      wsRef.current.onmessage = null;
+    }
+
     intentionalCloseRef.current = false;
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
@@ -177,7 +189,12 @@ export function useChat() {
 
     ws.onclose = () => {
       console.log("[WS] disconnected");
-      wsRef.current = null;
+      // Only clear ref if it still points to this WebSocket.
+      // Prevents StrictMode double-mount races where a stale
+      // onclose handler clears a newer connection's reference.
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
       if (!intentionalCloseRef.current) {
         scheduleReconnect();
       }

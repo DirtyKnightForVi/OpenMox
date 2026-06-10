@@ -36,6 +36,7 @@ os.environ.setdefault("DEEPSEEK_MODEL", "deepseek-v4-flash")
 os.environ.setdefault("REDIS_HOST", "localhost")
 os.environ.setdefault("REDIS_PORT", "6480")
 os.environ.setdefault("OPENMOX_THINKING", "0")  # 0=disabled, 1=enabled (deepseek-v4 reasoning mode)
+os.environ.setdefault("OPENMOX_LOG_DIR", str(BACKEND_DIR.parent / "logs"))
 
 if __name__ == "__main__":
     import uvicorn

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "NO_COLOR=1 next dev 2>&1 | tee -a ../logs/openmox-frontend.log",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"

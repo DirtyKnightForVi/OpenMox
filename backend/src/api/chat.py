@@ -26,6 +26,7 @@ from ..orchestration.router import MentionRouter
 from ..core.store import append_message
 from ..core.logging import get_logger, LogContext
 from ..core.ws_registry import register as ws_register, unregister as ws_unregister
+from .projects import _init_momo_if_needed
 
 log = get_logger(__name__)
 
@@ -113,6 +114,15 @@ async def handle_ws(ws: WebSocket) -> None:
 
     except WebSocketDisconnect:
         log.info("WebSocket disconnected")
+    except RuntimeError as e:
+        # "WebSocket is not connected. Need to call "accept" first." is raised
+        # by Starlette when the client disconnects before the first receive.
+        # This is normal during React StrictMode double-mount or page hot-reload.
+        msg = str(e)
+        if "accept" in msg and "not connected" in msg.lower():
+            log.info("WebSocket client disconnected before handshake complete")
+        else:
+            log.error("WebSocket error: %s", e)
     except Exception as e:
         log.error("WebSocket error: %s", e)
     finally:
@@ -228,6 +238,9 @@ async def _handle_command(
             speaker_type="human", speaker_id="user",
         )
 
+    # ── Ensure project has a momo agent (auto-init for legacy projects) ──
+    _init_momo_if_needed(project_path)
+
     # ── Spawn ChatService.run() for each mentioned agent ──
     results: list[dict] = []
     log.info("_handle_command: spawning %d agents: %s", len(mentioned), mentioned)
@@ -248,6 +261,15 @@ async def _handle_command(
                     "chat may fail",
                     agent_id, project_path,
                 )
+                # Send immediate user feedback instead of hanging for 10 s.
+                await _safe_send(ws, {
+                    "type": "system_message",
+                    "content": (
+                        f"Agent「{agent_id}」在此项目中尚未创建。"
+                        f"请先在项目设置中创建该 Agent。"
+                    ),
+                })
+                return {"agent_id": agent_id, "text": ""}
         except Exception as exc:
             log.warning(
                 "Failed to register agent %r from %s: %s",
