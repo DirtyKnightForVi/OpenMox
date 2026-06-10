@@ -68,6 +68,7 @@ class OpenMoxRedisStorage(RedisStorage):
         """Convert ConfigDAO AgentConfig → AgentScope AgentRecord."""
         from agentscope.app.storage import AgentRecord, AgentData
         return AgentRecord(
+            id=cfg.id,   # MUST match agent_id so RedisStorage.get_agent can find it
             user_id=_USER_ID,
             source="user",
             data=AgentData(
@@ -108,9 +109,19 @@ class OpenMoxRedisStorage(RedisStorage):
     async def get_agent(
         self, user_id: str, agent_id: str,
     ) -> AgentRecord | None:
-        """Get a single agent by id."""
+        """Get a single agent by id.
+
+        Checks Redis first (where :meth:`ensure_agent_from_path` writes
+        project-scoped agents), then falls back to the local ConfigDAO
+        (``.Agents/`` YAML).
+        """
         if not agent_id:
             return None
+        # 1. Try Redis — project-scoped agents live here.
+        record = await RedisStorage.get_agent(self, user_id, agent_id)
+        if record is not None:
+            return record
+        # 2. Fallback: local ConfigDAO for onboarded agents.
         dao = self._ensure_dao()
         cfg = dao.get_agent(agent_id)
         if not cfg:

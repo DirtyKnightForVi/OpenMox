@@ -114,10 +114,22 @@ def build_openmox_tools(
 
 
 async def _resolve_project_path(session_id: str) -> str:
-    """Derive project_path from the ws_registry, fall back to current dir."""
+    """Derive project_path from the ws_registry, fall back to current dir.
+
+    ChatService passes ``session_id`` as ``{window_id}:{agent_id}``,
+    but the registry stores entries under the bare ``window_id``.
+    """
     from .ws_registry import get_project_path
     project_path = await get_project_path(session_id)
-    return project_path if project_path else "."
+    if project_path:
+        return project_path
+    # Strip trailing ``:agent_id`` suffix and retry
+    if ":" in session_id:
+        window_id = session_id.rsplit(":", 1)[0]
+        project_path = await get_project_path(window_id)
+        if project_path:
+            return project_path
+    return "."
 
 
 async def build_openmox_tools_factory(

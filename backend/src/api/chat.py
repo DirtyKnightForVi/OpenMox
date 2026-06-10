@@ -335,12 +335,24 @@ async def _handle_command(
         await asyncio.wait_for(sub_ready.wait(), timeout=5.0)
         await asyncio.sleep(0)  # let collector enter async-for
 
-        await chat_service.run(
-            user_id=user_id,
-            session_id=session_id,
-            agent_id=agent_id,
-            input_msg=input_msg,
-        )
+        log.info("_run_one: entering chat_service.run() session=%s", session_id[:30])
+        try:
+            await asyncio.wait_for(
+                chat_service.run(
+                    user_id=user_id,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    input_msg=input_msg,
+                ),
+                timeout=120.0,
+            )
+        except asyncio.TimeoutError:
+            log.error("_run_one: chat_service.run() timed out after 120s for %s", session_id[:30])
+            await _safe_send(ws, {
+                "type": "system_message",
+                "content": f"Agent「{agent_id}」响应超时，请重试。",
+            })
+            return {"agent_id": agent_id, "text": ""}
 
         try:
             await asyncio.wait_for(collector_task, timeout=10.0)

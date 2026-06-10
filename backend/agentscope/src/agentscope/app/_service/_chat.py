@@ -143,9 +143,12 @@ optional):
                   ``ExternalExecutionResultEvent``: resume an awaiting
                   tool call (Case B).
         """
+        import sys
+        print(f"[DIAG] ChatService.run ENTER user={user_id} sess={session_id[:20]} agent={agent_id}", file=sys.stderr, flush=True)
         try:
             await self._run_impl(user_id, session_id, agent_id, input_msg)
         except Exception as e:
+            print(f"[DIAG] ChatService.run EXCEPTION: {e}", file=sys.stderr, flush=True)
             logger.exception(
                 "ChatService.run failed for user_id=%s session_id=%s "
                 "agent_id=%s, error=%s",
@@ -170,12 +173,17 @@ optional):
         swallowing. Separated so the try/except doesn't bury the
         per-step logic at one extra indentation level."""
 
+        import sys as _sys
+        print(f"[DIAG] _run_impl ENTER agent={agent_id} sess={session_id[:20]}", file=_sys.stderr, flush=True)
+
         # ----------------------------------------------------------------
         # 1. Load records + resolve workspace ONCE here, reused below.
         # Reject missing records up front with a clear error so the
         # downstream assembly code can rely on non-None values.
         # ----------------------------------------------------------------
         agent_record = await self._storage.get_agent(user_id, agent_id)
+        logger.debug("_run_impl: agent_id=%s session_id=%s found=%s",
+                      agent_id, session_id, agent_record is not None)
         if agent_record is None:
             raise HTTPException(
                 status_code=404,
