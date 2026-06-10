@@ -166,6 +166,8 @@ async def _handle_command(
         })
         return
 
+    user_id = "openmox"
+
     # ── Default routing to momo ────────────────────
     if not mentioned:
         from ..dao import ConfigDAO
@@ -227,13 +229,30 @@ async def _handle_command(
         )
 
     # ── Spawn ChatService.run() for each mentioned agent ──
-    user_id = "openmox"
     results: list[dict] = []
     log.info("_handle_command: spawning %d agents: %s", len(mentioned), mentioned)
 
     async def _run_one(agent_id: str) -> dict:
         """Run one agent via ChatService and collect result text."""
         session_id = f"{window_id}:{agent_id}"
+
+        # Register the project-scoped agent into Redis so the singleton
+        # storage can find it — otherwise ChatService._run_impl gets 404.
+        try:
+            ok = await storage.ensure_agent_from_path(
+                user_id, agent_id, project_path,
+            )
+            if not ok:
+                log.warning(
+                    "Agent %r not found in project %s/.Agents/ — "
+                    "chat may fail",
+                    agent_id, project_path,
+                )
+        except Exception as exc:
+            log.warning(
+                "Failed to register agent %r from %s: %s",
+                agent_id, project_path, exc,
+            )
 
         # Ensure session exists
         from agentscope.app.storage import SessionConfig, SessionSource
