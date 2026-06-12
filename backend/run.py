@@ -30,7 +30,6 @@ if not AGENTSCOPE_SRC.exists():
 sys.path.insert(0, str(AGENTSCOPE_SRC))
 
 # ── Default environment variables ──────────────────────
-os.environ.setdefault("DEEPSEEK_API_KEY", "sk-6fae26aeffe643fdbe6a93f9edea1a58")
 os.environ.setdefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 os.environ.setdefault("DEEPSEEK_MODEL", "deepseek-v4-flash")
 os.environ.setdefault("REDIS_HOST", "localhost")

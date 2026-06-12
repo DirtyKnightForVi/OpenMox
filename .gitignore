@@ -12,7 +12,9 @@ frontend/.next/
 
 logs/
 
+.env
 
 .codegraph/
 AGENTS.md
 *.pyc
+.mcp.json

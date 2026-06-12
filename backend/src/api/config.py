@@ -30,21 +30,23 @@ CONFIG_PATH = BACKEND_DIR / "pilotdeck.yaml"
 async def get_config():
     """Return current config (PilotDeck compat)."""
     s = get_settings()
+    # Never expose plaintext credentials via API response.
+    api_key_value = "${DEEPSEEK_API_KEY}"
     raw = f"""schemaVersion: 1
 model:
-  providers:
-    deepseek:
-      protocol: openai
-      url: {s.deepseek_base_url}
-      apiKey: {s.deepseek_api_key}
-      models:
-        {s.deepseek_model}: {{}}
+    providers:
+        deepseek:
+            protocol: openai
+            url: {s.deepseek_base_url}
+            apiKey: {api_key_value}
+            models:
+                {s.deepseek_model}: {{}}
 agent:
-  model: deepseek/{s.deepseek_model}
+    model: deepseek/{s.deepseek_model}
 memory:
-  enabled: false
+    enabled: false
 router:
-  enabled: false
+    enabled: false
 """
     return {
         "path": str(CONFIG_PATH),
