@@ -21,6 +21,7 @@ export function useChat() {
   const {
     currentWindowId,
     currentProject,
+    currentProjectPath,
     addMessage,
     appendToLastMessage,
     appendThinkingToLastMessage,
@@ -103,16 +104,10 @@ export function useChat() {
       }
 
       // ── HINT_BLOCK (context seeding) ──
-      if (type === "HINT_BLOCK") {
-        addMessage({
-          id: `hint-${Date.now()}`,
-          sender: agentId || "system",
-          text: `[上下文] ${data._hint || ""}`,
-          timestamp: (data._timestamp || 0) * 1000,
-          events: [],
-        });
-        return;
-      }
+      // These are internal context-seeding events from
+      // ContextSeedingMiddleware — they exist to seed agent
+      // memory, not for human display.  Silently consume them.
+      if (type === "HINT_BLOCK") return;
 
       // ── REPLY_START ──
       if (type === "REPLY_START") {
@@ -234,7 +229,11 @@ export function useChat() {
         return;
       }
       if (!currentWindowId) return;
-      const cwd = currentProject?.full_path || ".";
+      // Resolve project path: prefer store value, fall back to
+      // currentProject.full_path, then to "." as last resort.
+      const cwd = currentProjectPath
+        || currentProject?.full_path
+        || ".";
 
       wsRef.current.send(
         JSON.stringify({
@@ -249,7 +248,7 @@ export function useChat() {
         }),
       );
     },
-    [currentWindowId, currentProject],
+    [currentWindowId, currentProject, currentProjectPath],
   );
 
   const disconnect = useCallback(() => {

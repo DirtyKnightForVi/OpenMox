@@ -1,0 +1,17 @@
+version: 1
+updated_at: '2026-06-17T22:00:03'
+tasks:
+- id: task-b997934f
+  title: 面膜广告产品构思
+  description: 构思面膜广告的产品创意方案，包括目标用户分析、核心卖点、广告创意方向等
+  phase: research
+  owner: pm-1
+  status: in_progress
+  depends_on: []
+  window_id: null
+  created_by: momo
+  created_at: '2026-06-17T21:59:56'
+  completed_at: ''
+  output: ''
+  blocked_reason: ''
+  communication_budget: 4

@@ -134,13 +134,21 @@ class OnboardingMiddleware(MiddlewareBase):
         onboarding_context: str = "",
         dashboard_dao=None,          # DashboardDAO | None
         window_id: str = "",
+        team_roster: str = "",       # "## 团队成员\n- momo (协调者)\n- product-manager (产品经理)"
+        project_root: str = ".",     # for reading PROJECT_MEMO.md
     ):
         self._context = onboarding_context
         self._dashboard_dao = dashboard_dao
         self._window_id = window_id
+        self._team_roster = team_roster
+        self._project_root = project_root
 
     async def on_system_prompt(self, agent, prompt: str) -> str:
         additions: list[str] = []
+
+        # Team roster — let the agent know who its colleagues are
+        if self._team_roster:
+            additions.append(self._team_roster)
 
         # Static background
         if self._context:
@@ -163,7 +171,7 @@ class OnboardingMiddleware(MiddlewareBase):
         # and POST /api/memory/{id}/sync (cloud→local).
         try:
             from ..dao import ConfigDAO
-            dao = ConfigDAO(".")
+            dao = ConfigDAO(self._project_root)
             project_memo = dao.get_project_memo()
             if project_memo.strip():
                 # Keep only the first 2000 chars to avoid token bloat

@@ -71,6 +71,12 @@ export async function updateDashboardTask(taskId: string, updates: Record<string
   });
 }
 
+// ── Sessions / Messages ─────────────────────────────────
+
+export async function getMessages(sessionId: string) {
+  return fetchAPI<{ messages: any[]; hasMore: boolean }>(`/sessions/${sessionId}/messages`);
+}
+
 // ── Memory ─────────────────────────────────────────────
 
 export async function listMemory(agentId: string, scope?: string, limit = 50) {

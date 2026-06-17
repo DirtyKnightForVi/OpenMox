@@ -297,11 +297,17 @@ def build_dashboard_tools(
     agent_id: str = "",
     is_momo: bool = False,
     window_id: str = "",
+    project_root: str = "",
 ) -> list:
     """Return dashboard tools for one agent.
 
     Every agent gets UpdateDashboard.
     Only momo gets CreateTaskPlan + WriteSharedMemory.
+
+    Args:
+        project_root: Absolute path to the project directory. If provided,
+                      tools get a project-scoped DashboardDAO so they write
+                      to the correct DASHBOARD.yaml.
     """
     kwargs = dict(
         storage=storage,
@@ -310,6 +316,7 @@ def build_dashboard_tools(
         session_id=window_id,
         agent_id=agent_id,
         is_momo=is_momo,
+        project_root=project_root,
     )
     tools = [UpdateDashboardTool(**kwargs)]
     if is_momo:

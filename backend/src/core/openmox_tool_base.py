@@ -66,6 +66,7 @@ class OpenMoxToolBase(_TeamToolBase):
         session_id: str = "",
         agent_id: str = "",
         is_momo: bool | None = None,
+        project_root: str = "",
     ) -> None:
         """Hand off to _TeamToolBase first, then extract our DAOs.
 
@@ -77,6 +78,9 @@ class OpenMoxToolBase(_TeamToolBase):
             agent_id: The agent that owns this tool.
             is_momo: Override for tests where the agent may not exist
                      in the YAML config.  If None, derived from _dao.is_momo().
+            project_root: Absolute path to the project directory. If provided,
+                          creates a per-tool DashboardDAO scoped to this project
+                          (fixes the singleton storage pointing to the wrong dir).
         """
         super().__init__(
             storage=storage,
@@ -85,11 +89,20 @@ class OpenMoxToolBase(_TeamToolBase):
             session_id=session_id,
             agent_id=agent_id,
         )
-        # Extract OpenMox-specific DAOs from the storage adapter.
-        # Tools reference these directly (self._dao / self._dashboard_dao).
-        self._dao = getattr(storage, "_dao", None)
-        self._dashboard_dao = getattr(storage, "_dashboard_dao", None)
         self._window_id = session_id
+
+        # Use project-scoped DAOs if project_root is given.
+        # Otherwise fall back to the storage singleton (backward compat
+        # for tests that don't provide project_root).
+        if project_root:
+            from ..dao.config_dao import ConfigDAO
+            from ..dao.dashboard_dao import DashboardDAO
+            self._dao = ConfigDAO(project_root)
+            self._dashboard_dao = DashboardDAO(project_root)
+        else:
+            self._dao = getattr(storage, "_dao", None)
+            self._dashboard_dao = getattr(storage, "_dashboard_dao", None)
+
         if is_momo is not None:
             self._is_momo = is_momo
         elif self._dao is not None:

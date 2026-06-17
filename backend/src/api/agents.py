@@ -24,8 +24,31 @@ router = APIRouter(prefix="/api", tags=["agents"])
 
 
 def _resolve_path(project_key: str) -> Path:
+    """Resolve a project key to an absolute path.
+
+    - Absolute paths are returned as-is.
+    - Non-absolute keys (e.g., project names) are looked up in the
+      SQLite projects table to retrieve the stored full_path.
+    - Falls back to the current working directory if not found.
+    """
     p = Path(project_key)
-    return p if p.is_absolute() else Path.cwd()
+    if p.is_absolute():
+        return p
+    # Look up by name in the projects database
+    import sqlite3
+    try:
+        db = sqlite3.connect("data/openmox.db")
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            "SELECT full_path FROM projects WHERE name = ? LIMIT 1",
+            (project_key,),
+        ).fetchone()
+        db.close()
+        if row and row[0]:
+            return Path(row[0])
+    except Exception:
+        pass
+    return Path.cwd()
 
 
 # ── Agent CRUD ─────────────────────────────────────────

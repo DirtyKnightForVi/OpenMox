@@ -19,7 +19,7 @@ const QUICK_TEMPLATES = [
 
 export default function ProjectListPage() {
   const router = useRouter();
-  const { projects, setProjects, setCurrentProject } = useAppStore();
+  const { projects, setProjects, setCurrentProject, setCurrentProjectPath } = useAppStore();
   const [showNew, setShowNew] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPath, setNewPath] = useState("");
@@ -75,7 +75,10 @@ export default function ProjectListPage() {
   const openProject = (p: { name: string }) => {
     const wid = `web:s_${Date.now()}`;
     const project = projects.find((pr) => pr.name === p.name);
-    if (project) setCurrentProject(project, wid);
+    if (project) {
+      setCurrentProject(project, wid);
+      if (project.full_path) setCurrentProjectPath(project.full_path);
+    }
     router.push(`/project/${p.name}?window=${wid}`);
   };
 

@@ -6,7 +6,7 @@ import { Plus } from "@phosphor-icons/react";
 import { clsx } from "clsx";
 import { useAppStore } from "@/stores/app";
 import { useChat } from "@/lib/useChat";
-import { getDashboard, listAgents } from "@/lib/api";
+import { getDashboard, listAgents, getMessages } from "@/lib/api";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { AgentAvatar } from "@/components/agents/AgentAvatar";
 import { ChatMessageList } from "@/components/chat/ChatMessageList";
@@ -27,6 +27,8 @@ export default function ProjectPage() {
     wsConnected,
     setTasks,
     setAgents,
+    setCurrentProject,
+    setCurrentProjectPath,
     addWindowTab,
     setActiveWindowId,
   } = useAppStore();
@@ -34,6 +36,23 @@ export default function ProjectPage() {
   const [tasksLoading, setTasksLoading] = useState(true);
 
   const projectName = params.id as string;
+  // Resolve project_path from the store — fall back to projects list lookup
+  const projectPath = useMemo(() => {
+    if (currentProject?.full_path) return currentProject.full_path;
+    // Try to find by name from the stored projects list
+    const found = useAppStore.getState().projects.find(
+      (p: { name: string }) => p.name === projectName
+    );
+    return found?.full_path || ".";
+  }, [currentProject, projectName]);
+
+  // Sync resolved projectPath to the store so useChat can use it
+  useEffect(() => {
+    if (projectPath && projectPath !== ".") {
+      setCurrentProjectPath(projectPath);
+    }
+  }, [projectPath, setCurrentProjectPath]);
+
   // Stable windowId: use URL param when present, otherwise generate once
   const fallbackRef = useRef<string | null>(null);
   const windowId = useMemo(() => {
@@ -45,6 +64,36 @@ export default function ProjectPage() {
     return fallbackRef.current;
   }, [searchParams]);
 
+  // Load message history on page load / window switch
+  useEffect(() => {
+    if (!windowId || windowId === "new") return;
+    getMessages(windowId)
+      .then((res) => {
+        if (res.messages) {
+          const msgs = res.messages.map((m: any) => ({
+            id: `hist-${m.id}`,
+            sender: m.speaker_type === "human" ? "user" : (m.speaker_id || "assistant"),
+            text: m.content || "",
+            timestamp: (m.timestamp || 0) * 1000,
+            events: [],
+          }));
+          // Replace, don't append — history is the full timeline
+          useAppStore.setState((s) => ({ messages: msgs }));
+        }
+      })
+      .catch(() => {});
+  }, [windowId]);
+
+  // Ensure we have the projects list on page load (e.g., direct URL navigation)
+  const { projects, setProjects } = useAppStore();
+  useEffect(() => {
+    if (projects.length === 0) {
+      import("@/lib/api").then(({ listProjects }) =>
+        listProjects().then(setProjects).catch(() => {})
+      );
+    }
+  }, [projects.length, setProjects]);
+
   useEffect(() => {
     connect();
   }, [connect]);
@@ -53,20 +102,27 @@ export default function ProjectPage() {
     listAgents(projectName).then(setAgents).catch(() => {});
   }, [projectName, setAgents]);
 
+  // Poll dashboard every 30s (reduced from 5s to avoid request flood).
+  // Use a ref to track active state — prevents duplicate intervals from
+  // React StrictMode double-mount.
+  const dashIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => {
-    setTasksLoading(true);
-    getDashboard(windowId)
-      .then((d) => setTasks(Object.values(d.phases).flat()))
-      .catch(() => {})
-      .finally(() => setTasksLoading(false));
-
-    const interval = setInterval(() => {
-      getDashboard(windowId)
+    const fetchDash = () => {
+      getDashboard(windowId, projectPath)
         .then((d) => setTasks(Object.values(d.phases).flat()))
         .catch(() => {});
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [windowId, setTasks]);
+    };
+    setTasksLoading(true);
+    fetchDash();
+    dashIntervalRef.current = setInterval(fetchDash, 30_000);
+    return () => {
+      if (dashIntervalRef.current) {
+        clearInterval(dashIntervalRef.current);
+        dashIntervalRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowId, projectPath]);
 
   // Register the current window as a tab, and ensure currentWindowId is synced
   // to the store (critical: sendMessage in useChat relies on store.currentWindowId)

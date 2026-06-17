@@ -39,7 +39,10 @@ def _init_momo_if_needed(project_path: str) -> None:
         log.warning("No agent templates found — skipping momo init for %s", project_path)
         return
 
-    template_id = templates[0].id
+    # Prefer pm-secretary (momo's canonical role: coordinator), fall back
+    # to the first available template if pm-secretary is somehow missing.
+    momo_tmpl = next((t for t in templates if t.id == "pm-secretary"), None)
+    template_id = momo_tmpl.id if momo_tmpl else templates[0].id
     try:
         cfg = dao.create_agent(
             agent_id="momo",
@@ -177,7 +180,12 @@ async def api_create_workspace(request: Request):
             detail=f"Cannot create project directory: {exc}",
         )
 
+    # Auto-create momo agent (pm-secretary template) — every project
+    # must have a coordinator.
+    _init_momo_if_needed(path)
+
     project = await create_project(name, path, display_name)
+    log.info("Project created (workspace): %s at %s", name, path)
     return project
 
 

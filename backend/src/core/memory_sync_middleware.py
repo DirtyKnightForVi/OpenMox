@@ -74,8 +74,10 @@ class MemorySyncMiddleware(MiddlewareBase):
         )
 
         # Execute the tool normally
+        log.debug("[memory sync] agent=%s tool=%s → executing", self._agent_id, tool_name)
         async for event in next_handler(tool_call=tool_call):
             yield event
+        log.debug("[memory sync] agent=%s tool=%s → done", self._agent_id, tool_name)
 
         # After execution, sync if applicable
         if should_sync:

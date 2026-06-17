@@ -135,7 +135,7 @@ async def lifespan(app: FastAPI):
         #    extra_agent_tools: dashboard/call_agent/AgentFromTemplate tools.
         #    extra_agent_middlewares: factory-of-factory to capture message_bus
         #    for ContextSeedingMiddleware + WindowPublishMiddleware.
-        from agentscope.app._service._chat import ChatService
+        from src.core.openmox_chat_service import OpenMoxChatService
         from src.core.openmox_toolkit import (
             make_tools_factory,
             make_middleware_factory,
@@ -155,7 +155,7 @@ async def lifespan(app: FastAPI):
             message_bus=message_bus,
             project_root=".",
         )
-        chat_service = ChatService(
+        chat_service = OpenMoxChatService(
             storage=storage,
             workspace_manager=workspace_manager,
             scheduler_manager=scheduler,

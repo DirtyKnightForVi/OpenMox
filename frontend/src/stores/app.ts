@@ -39,10 +39,12 @@ interface AppState {
   // ── Window / Topic tabs ──
   windowTabs: WindowTab[];
   activeWindowId: string;
+  currentProjectPath: string;
 
   // Actions
   setProjects: (projects: Project[]) => void;
   setCurrentProject: (project: Project | null, windowId: string) => void;
+  setCurrentProjectPath: (path: string) => void;
   setAgents: (agents: Agent[]) => void;
   setTemplates: (templates: { id: string; name: string; description: string; skills_count: number }[]) => void;
   addMessage: (msg: ChatMessage) => void;
@@ -81,6 +83,7 @@ export const useAppStore = create<AppState>((set) => ({
   wsConnected: false,
   windowTabs: [],
   activeWindowId: '',
+  currentProjectPath: '',
 
   setProjects: (projects) => set({ projects }),
   setCurrentProject: (project, windowId) =>
@@ -162,4 +165,5 @@ export const useAppStore = create<AppState>((set) => ({
         : s.activeWindowId,
     })),
   setActiveWindowId: (id) => set({ activeWindowId: id }),
+  setCurrentProjectPath: (path) => set({ currentProjectPath: path }),
 }));

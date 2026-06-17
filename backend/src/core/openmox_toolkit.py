@@ -160,6 +160,7 @@ def make_tools_factory(
             tools.extend(build_dashboard_tools(
                 storage=storage, message_bus=message_bus,
                 agent_id=agent_id, is_momo=is_momo, window_id=session_id,
+                project_root=project_path,
             ))
         except Exception:
             pass
@@ -171,6 +172,7 @@ def make_tools_factory(
                     storage=storage, message_bus=message_bus,
                     user_id=user_id, session_id=session_id,
                     agent_id=agent_id, is_momo=True,
+                    project_root=project_path,
                 ))
             except Exception:
                 pass
@@ -232,6 +234,18 @@ def make_middleware_factory(
         dashboard_dao = DashboardDAO(proj_root)
         onboarding = dao.get_onboarding_context()
 
+        # Build team roster for system prompt injection
+        agents = dao.list_agents()
+        if len(agents) > 1:
+            lines = ["## 团队成员（使用 TeamSay 与他们协作）"]
+            for a in agents:
+                tag = " 👑 协调者" if a.is_momo else ""
+                caps = f" — {', '.join(a.capabilities[:3])}" if a.capabilities else ""
+                lines.append(f"- **{a.id}** ({a.name}){tag}{caps}")
+            team_roster = "\n".join(lines)
+        else:
+            team_roster = ""
+
         window_id = session_id
 
         middlewares = [
@@ -245,6 +259,8 @@ def make_middleware_factory(
                 onboarding_context=onboarding,
                 dashboard_dao=dashboard_dao,
                 window_id=window_id,
+                team_roster=team_roster,
+                project_root=proj_root,
             ),
             MemoryCaptureMiddleware(
                 agent_id=agent_id,

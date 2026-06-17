@@ -51,7 +51,12 @@ class OpenMoxWorkspaceManager(WorkspaceManagerBase):
         session_id: str,
         workspace_id: str,
     ) -> LocalWorkspace:
-        """Return a cached or newly-built workspace for ``workspace_id``."""
+        """Return a cached or newly-built workspace for ``workspace_id``.
+
+        When ``workspace_id`` looks like an absolute path (e.g.
+        ``/tmp/testpro5``), the workdir is scoped to that project.
+        Otherwise the default ``project_root`` is used.
+        """
         async with self._lock:
             now = time.monotonic()
             cached = self._cache.get(workspace_id)
@@ -60,9 +65,15 @@ class OpenMoxWorkspaceManager(WorkspaceManagerBase):
                 self._cache[workspace_id] = (ws, now)
                 return ws
 
+        # Use workspace_id as project path if it looks like one
+        workdir = (
+            workspace_id
+            if workspace_id.startswith("/") and len(workspace_id) > 1
+            else self._project_root
+        )
         ws = LocalWorkspace(
             workspace_id=workspace_id,
-            workdir=self._project_root,
+            workdir=workdir,
         )
         await ws.initialize()
         async with self._lock:

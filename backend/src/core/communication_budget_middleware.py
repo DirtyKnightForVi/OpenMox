@@ -19,6 +19,7 @@ Design constraints:
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
 from agentscope.middleware import MiddlewareBase
@@ -96,12 +97,22 @@ class CommunicationBudgetMiddleware(MiddlewareBase):
         """
         tool_call: "ToolCallBlock" = input_kwargs["tool_call"]
         tool_name = tool_call.name
-        tool_input: dict[str, Any] = tool_call.input or {}
+        raw_input = tool_call.input or {}
+        # tool_call.input can be a JSON string from the model
+        if isinstance(raw_input, str):
+            try:
+                tool_input: dict[str, Any] = json.loads(raw_input)
+            except (json.JSONDecodeError, TypeError):
+                tool_input = {}
+        else:
+            tool_input = raw_input
 
         # -- Only intercept TeamSay ------------------------------------------
         if tool_name != "TeamSay":
+            log.debug("Budget: agent=%s tool=%s → pass through", self._agent_id, tool_name)
             async for event in next_handler(tool_call=tool_call):
                 yield event
+            log.debug("Budget: agent=%s tool=%s → done", self._agent_id, tool_name)
             return
 
         # -- Resolve direction ------------------------------------------------

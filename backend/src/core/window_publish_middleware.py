@@ -41,6 +41,8 @@ _PUBLIC_EVENT_TYPES: set[str] = {
     "TOOL_RESULT_END",
     "HINT_BLOCK",
     "EXCEED_MAX_ITERS",
+    "THINKING_BLOCK_START",
+    "THINKING_BLOCK_END",
 }
 
 # ── Max events retained in the window stream ─────────
@@ -84,8 +86,10 @@ class WindowPublishMiddleware(MiddlewareBase):
     ) -> AsyncGenerator[Any, None]:
         """Wrap the entire reply, filtering + publishing public events."""
         text_buffer: str = ""
+        _event_idx = 0
 
         async for event in next_handler(**input_kwargs):
+            _event_idx += 1
             event_type = getattr(event, "type", None) or event.__class__.__name__
 
             # ── Accumulate text deltas ─────────────
@@ -116,6 +120,14 @@ class WindowPublishMiddleware(MiddlewareBase):
 
                 payload["_agent_id"] = self._agent_id
                 payload["_timestamp"] = time.time()
+                # Log tool calls with name for debugging
+                if event_type in ("TOOL_CALL_END", "TOOL_RESULT_END"):
+                    tool_name = payload.get("name", "?")
+                    tool_state = payload.get("state", "")
+                    log.debug(
+                        "WindowPublish: agent=%s %s tool=%s state=%s",
+                        self._agent_id, event_type, tool_name, tool_state,
+                    )
                 await self._publish(payload)
 
             yield event
@@ -129,6 +141,9 @@ class WindowPublishMiddleware(MiddlewareBase):
                 "text": text_buffer,
             })
 
+        log.info("WindowPublish: agent=%s reply finished, %d events, text=%d chars",
+                 self._agent_id, _event_idx, len(text_buffer))
+
     async def _publish(self, payload: dict) -> None:
         """Write one event to the window stream (replay log + live pub/sub)."""
         try:
@@ -138,5 +153,12 @@ class WindowPublishMiddleware(MiddlewareBase):
                 max_len=_WINDOW_STREAM_MAX_LEN,
             )
             await self._bus.publish(self._window_key, payload)
+            # Debug: log every published event for troubleshooting
+            log.debug(
+                "WindowPublish: agent=%s type=%s key=%s",
+                self._agent_id,
+                payload.get("type", "?"),
+                self._window_key[:30],
+            )
         except Exception:
             pass  # best-effort; don't break the reply chain

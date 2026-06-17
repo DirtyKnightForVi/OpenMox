@@ -104,13 +104,28 @@ async def handle_ws(ws: WebSocket) -> None:
 
                 if _registered_window is None:
                     _registered_window = window_id
+                    # Resolve project_path: if the frontend sent "." (default),
+                    # look up the real path from the SQLite projects table by
+                    # matching against the mentioned agents.
+                    if _project_path == ".":
+                        from ..dao import ConfigDAO
+                        mentioned_test, _ = mention_router.parse(
+                            msg.get("command", ""),
+                        )
+                        _project_path = _resolve_project_from_agents(
+                            mentioned_test,
+                        )
                     await ws_register(window_id, ws, _project_path)
                     log.info(
                         "WS registered: window=%s project=%s",
                         window_id[:30], _project_path,
                     )
 
-                await _handle_command(ws, msg, mention_router, window_id, _project_path)
+                await _handle_command(
+                    ws, msg, mention_router, window_id, _project_path,
+                    # _invoked_agents starts empty — only chain-triggers
+                    # populate it to prevent re-invocation loops.
+                )
 
     except WebSocketDisconnect:
         log.info("WebSocket disconnected")
@@ -134,6 +149,36 @@ async def handle_ws(ws: WebSocket) -> None:
 # ── Chain-trigger depth limit ───────────────────────
 
 _MAX_CHAIN_DEPTH = 5
+
+
+def _resolve_project_from_agents(agent_ids: list[str]) -> str:
+    """Find the project path that contains the mentioned agents.
+
+    Scans all projects in the SQLite database.  Returns the first
+    project that has at least one of the mentioned agents, or "."
+    if none found.
+    """
+    if not agent_ids:
+        return "."
+    import sqlite3
+    try:
+        db = sqlite3.connect("data/openmox.db")
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            "SELECT name, full_path FROM projects ORDER BY created_at DESC",
+        ).fetchall()
+        db.close()
+        for row in rows:
+            proj_path = row["full_path"]
+            dao = ConfigDAO(proj_path)
+            existing = {a.id for a in dao.list_agents()}
+            if existing & set(agent_ids):
+                return proj_path
+    except Exception:
+        pass
+    return "."
+
+
 # ── Command handler ────────────────────────────────────
 
 
@@ -144,14 +189,28 @@ async def _handle_command(
     window_id: str,
     project_path: str,
     _chain_depth: int = 0,
+    _invoked_agents: frozenset = frozenset(),
 ) -> None:
     """Process a pilotdeck-command: parse @agent, spawn ChatService tasks,
     subscribe to window stream for events.
+
+    Args:
+        _chain_depth: Recursion depth for chain-triggered @mentions.
+        _invoked_agents: Agent IDs already invoked in this command tree.
+            Chain-triggers skip agents already in this set to prevent
+            feedback loops when multiple agents are @mentioned together.
     """
     command: str = msg.get("command", "")
 
     # Parse @mentions
     mentioned, clean_msg = mention_router.parse(command)
+
+    # Deduplicate against already-invoked agents (chain-trigger guard)
+    if _invoked_agents:
+        mentioned = [a for a in mentioned if a not in _invoked_agents]
+        if not mentioned:
+            log.info("Chain trigger depth=%d: all agents already invoked, skipping", _chain_depth)
+            return
 
     log.info(
         "cmd depth=%d session=%s @agents=%s msg=%.60s",
@@ -176,7 +235,11 @@ async def _handle_command(
         })
         return
 
-    user_id = "openmox"
+    # Scope Redis keys by project path so each project gets
+    # isolated namespace (agents, sessions, teams, messages).
+    import hashlib
+    _project_hash = hashlib.md5(project_path.encode()).hexdigest()[:8]
+    user_id = f"openmox:{_project_hash}"
 
     # ── Ensure project Team for TeamSay communication ──
     # Reads/creates .Project/team.yaml, registers agents,
@@ -304,7 +367,9 @@ async def _handle_command(
         await storage.upsert_session(
             user_id, agent_id,
             config=SessionConfig(
-                workspace_id="default",
+                # Use project_path as workspace_id so
+                # OpenMoxWorkspaceManager scopes the workdir correctly.
+                workspace_id=project_path,
                 chat_model_config=model_cfg,
             ),
             session_id=session_id,
@@ -335,18 +400,29 @@ async def _handle_command(
         _current_agent = session_id.rsplit(":", 1)[-1] if ":" in session_id else ""
 
         async def _collect():
+            event_count = 0
             async for payload in message_bus.session_subscribe_events(
                 session_id, on_ready=sub_ready.set,
             ):
+                event_count += 1
+                etype = payload.get("type", "?")
                 # Inject _agent_id so frontend / tests can group events by agent
                 if _current_agent and "_agent_id" not in payload:
                     payload["_agent_id"] = _current_agent
                 # Forward every event to WebSocket directly
                 await _safe_send(ws, payload)
-                if payload.get("type") == "TEXT_BLOCK_DELTA":
+                if etype == "TEXT_BLOCK_DELTA":
                     text_parts.append(payload.get("delta", ""))
-                elif payload.get("type") == "REPLY_END":
-                    break
+                elif etype == "REPLY_END":
+                    log.info(
+                        "_collect: agent=%s REPLY_END after %d events, text_len=%d",
+                        _current_agent, event_count, len("".join(text_parts)),
+                    )
+                    return
+            log.warning(
+                "_collect: agent=%s stream ended without REPLY_END, events=%d",
+                _current_agent, event_count,
+            )
 
         collector_task = asyncio.create_task(_collect())
         await asyncio.wait_for(sub_ready.wait(), timeout=5.0)
@@ -359,7 +435,9 @@ async def _handle_command(
             "_timestamp": time.time(),
         })
 
+        _t0 = time.time()
         log.info("_run_one: entering chat_service.run() session=%s", session_id[:30])
+        _chat_error = None
         try:
             await asyncio.wait_for(
                 chat_service.run(
@@ -372,15 +450,22 @@ async def _handle_command(
             )
         except asyncio.TimeoutError:
             log.error("_run_one: chat_service.run() timed out after 120s for %s", session_id[:30])
-            await _safe_send(ws, {
-                "type": "system_message",
-                "content": f"Agent「{agent_id}」响应超时，请重试。",
-            })
-            return {"agent_id": agent_id, "text": ""}
+            _chat_error = "timeout"
+        except Exception as e:
+            log.error("_run_one: chat_service.run() failed for %s: %s", session_id[:30], e)
+            _chat_error = str(e)
+        _elapsed = time.time() - _t0
+        log.info("_run_one: chat_service.run() returned after %.1fs session=%s error=%s",
+                 _elapsed, session_id[:30], _chat_error or "none")
 
+        # Don't wait for collector — cancel it.  AgentScope's stream may
+        # end without REPLY_END when the ReAct loop pauses for external
+        # input, hits max_iters, or a tool raises.  Instead of hanging
+        # the frontend on three dots, we push agent:idle immediately.
+        collector_task.cancel()
         try:
-            await asyncio.wait_for(collector_task, timeout=10.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+            await collector_task
+        except asyncio.CancelledError:
             pass
 
         # ── Push agent:idle to WebSocket ──────────
@@ -389,6 +474,17 @@ async def _handle_command(
             "_agent_id": agent_id,
             "_timestamp": time.time(),
         })
+
+        # If chat_service crashed, tell the user.
+        if _chat_error:
+            await _safe_send(ws, {
+                "type": "system_message",
+                "content": (
+                    f"Agent「{agent_id}」执行异常"
+                    + (f"（{_chat_error}）" if _chat_error != "timeout" else "（超时）")
+                    + "，请重试。"
+                ),
+            })
 
         full_text = "".join(text_parts)
         return {"agent_id": agent_id, "text": full_text}
@@ -418,24 +514,34 @@ async def _handle_command(
         if _chain_depth < _MAX_CHAIN_DEPTH:
             reply_mentioned, _ = mention_router.parse(r["text"])
             if reply_mentioned:
-                log.info(
-                    "Chain trigger depth=%d: @%s ← %s",
-                    _chain_depth + 1, reply_mentioned, r["agent_id"],
-                )
-                chain_msg = {
-                    "type": "pilotdeck-command",
-                    "command": r["text"],
-                    "options": {
-                        "sessionKey": window_id,
-                        "sessionId": window_id,
-                        "projectPath": project_path,
-                        "cwd": project_path,
-                    },
-                }
-                await _handle_command(
-                    ws, chain_msg, mention_router,
-                    window_id, project_path, _chain_depth + 1,
-                )
+                # Build the set of already-invoked agents for the next depth:
+                # original invoked + agents just spawned in this batch.
+                next_invoked = _invoked_agents | frozenset(mentioned)
+                # Skip chain-trigger for agents already in invoked set
+                reply_mentioned = [
+                    a for a in reply_mentioned
+                    if a not in next_invoked
+                ]
+                if reply_mentioned:
+                    log.info(
+                        "Chain trigger depth=%d: @%s ← %s",
+                        _chain_depth + 1, reply_mentioned, r["agent_id"],
+                    )
+                    chain_msg = {
+                        "type": "pilotdeck-command",
+                        "command": r["text"],
+                        "options": {
+                            "sessionKey": window_id,
+                            "sessionId": window_id,
+                            "projectPath": project_path,
+                            "cwd": project_path,
+                        },
+                    }
+                    await _handle_command(
+                        ws, chain_msg, mention_router,
+                        window_id, project_path, _chain_depth + 1,
+                        _invoked_agents=next_invoked,
+                    )
 
 
 # ── Team management ─────────────────────────────────
@@ -522,7 +628,7 @@ async def _ensure_project_team(
         await storage.upsert_session(
             user_id, aid,
             config=SessionConfig(
-                workspace_id="default",
+                workspace_id=project_path,
                 chat_model_config=model_cfg,
             ),
             session_id=session_id,
