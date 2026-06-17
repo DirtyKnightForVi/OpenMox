@@ -91,6 +91,37 @@ async def trigger_reflect_all(
     return {"ok": True, "results": results}
 
 
+@router.post("/memory/{agent_id}/sync")
+async def sync_memory_to_file(
+    agent_id: str,
+    project_path: str = Query(default="."),
+    scope: str = Query(default="private"),
+):
+    """Sync SQLite memory entries → MEMORY.md Markdown file.
+
+    Reads all non-deprecated entries for the agent (private scope)
+    or all shared entries (shared scope) and writes them to the
+    corresponding Markdown file.
+    """
+    from ..memory.sync import sync_entries_to_markdown
+    count = await sync_entries_to_markdown(
+        agent_id=agent_id,
+        project_root=project_path,
+        scope=scope,
+    )
+    return {"ok": True, "entries_written": count}
+
+
+@router.post("/memory/project/sync")
+async def sync_project_memo(
+    project_path: str = Query(default="."),
+):
+    """Sync shared memories → .Project/PROJECT_MEMO.md."""
+    from ..memory.sync import sync_project_memo
+    count = await sync_project_memo(project_root=project_path)
+    return {"ok": True, "entries_written": count}
+
+
 @router.post("/memory/{agent_id}/rollback/{snapshot_id}")
 async def rollback_memory(
     agent_id: str,

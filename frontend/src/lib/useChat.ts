@@ -25,6 +25,10 @@ export function useChat() {
     appendToLastMessage,
     appendThinkingToLastMessage,
     setStreaming,
+    setAgentStatus,
+    updateWorkDetail,
+    addToolCallToAgent,
+    setWsConnected,
   } = store;
 
   const clearReconnectTimer = useCallback(() => {
@@ -57,6 +61,22 @@ export function useChat() {
 
       // ── Session status (heartbeat) ──
       if (type === "session-status") return;
+
+      // ── Agent status events ──
+      if (type === "agent:busy") {
+        setAgentStatus(agentId || "unknown", "busy");
+        if (agentId) {
+          updateWorkDetail(agentId, {
+            currentTask: data._source || "Working...",
+          });
+        }
+        return;
+      }
+
+      if (type === "agent:idle") {
+        setAgentStatus(agentId || "unknown", "idle");
+        return;
+      }
 
       // ── Human message echo ──
       if (type === "human_message") {
@@ -177,6 +197,7 @@ export function useChat() {
     ws.onopen = () => {
       console.log("[WS] connected");
       reconnectAttemptRef.current = 0;
+      setWsConnected(true);
     };
 
     ws.onmessage = (event) => {
@@ -189,6 +210,7 @@ export function useChat() {
 
     ws.onclose = () => {
       console.log("[WS] disconnected");
+      setWsConnected(false);
       // Only clear ref if it still points to this WebSocket.
       // Prevents StrictMode double-mount races where a stale
       // onclose handler clears a newer connection's reference.

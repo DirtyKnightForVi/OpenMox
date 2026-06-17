@@ -50,9 +50,11 @@ class OpenMoxRedisStorage(RedisStorage):
         self._dao: ConfigDAO | None = None
 
     async def __aenter__(self):
-        """Enter Redis context, then init ConfigDAO."""
+        """Enter Redis context, then init ConfigDAO + DashboardDAO."""
         result = await super().__aenter__()
         self._dao = ConfigDAO(self._project_root)
+        from ..dao.dashboard_dao import DashboardDAO
+        self._dashboard_dao = DashboardDAO(self._project_root)
         return result
 
     # ═══════════════════════════════════════════════════

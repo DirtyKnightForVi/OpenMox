@@ -67,9 +67,12 @@ class WindowPublishMiddleware(MiddlewareBase):
         agent_id: str,
     ) -> None:
         self._bus = message_bus
-        self._window_id = window_id
         self._agent_id = agent_id
-        self._window_key = f"window:{window_id}:events"
+        # window_id may be "web_s_xxx:momo" (session format).
+        # Extract the bare window_id so all agents in the same window
+        # write to the same window stream key.
+        self._window_id = window_id.rsplit(":", 1)[0] if ":" in window_id else window_id
+        self._window_key = f"window:{self._window_id}:events"
 
     # ── AgentScope on_reply hook (wraps the whole reply) ──
 
@@ -79,12 +82,7 @@ class WindowPublishMiddleware(MiddlewareBase):
         input_kwargs: dict,
         next_handler: Callable[..., AsyncGenerator],
     ) -> AsyncGenerator[Any, None]:
-        """Wrap the entire reply, filtering + publishing public events.
-
-        All events pass through to the next handler unchanged.
-        """
-        # Accumulate TEXT_BLOCK_DELTA text so we can emit a single
-        # compact TEXT_BLOCK_END to the window stream (avoiding deltas).
+        """Wrap the entire reply, filtering + publishing public events."""
         text_buffer: str = ""
 
         async for event in next_handler(**input_kwargs):

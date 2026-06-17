@@ -1,0 +1,7 @@
+# 全栈项目 — 预设 Agent 组合
+name: "全栈开发项目"
+description: "含产品经理 + 架构经理 + 开发经理 + 项目协调者，覆盖全流程"
+agents:
+  - product-manager
+  - arch-manager
+  - dev-manager

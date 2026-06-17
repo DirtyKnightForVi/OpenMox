@@ -63,7 +63,18 @@ async def api_list_projects():
 
 @router.post("/projects/create")
 async def api_create_project(request: Request):
-    """Create a project directory and persist to DB."""
+    """Create a project directory, optionally with selected agent templates.
+
+    Body:
+        path: str              — absolute project path (required)
+        name: str              — project name (default: basename of path)
+        display_name: str      — display name (default: name)
+        selected_templates: list[str] | None
+            — template IDs to instantiate (e.g. ["product-manager", "dev-manager"]).
+              If provided, agents are created from these templates and a
+              .Project/team.yaml is auto-generated with momo as leader.
+              If omitted, only a momo agent is auto-created.
+    """
     try:
         body = await request.json()
     except Exception:
@@ -75,6 +86,8 @@ async def api_create_project(request: Request):
 
     name = body.get("name", os.path.basename(path) or "new-project")
     display_name = body.get("display_name") or body.get("displayName") or name
+    selected_templates: list[str] | None = body.get("selected_templates")
+    template_id: str | None = body.get("template")  # preset template name
 
     # Ensure disk directories + project scaffold
     try:
@@ -89,8 +102,48 @@ async def api_create_project(request: Request):
             detail=f"Cannot create project directory: {exc}",
         )
 
-    # Auto-create the momo agent so the user can chat immediately.
-    _init_momo_if_needed(path)
+    dao = ConfigDAO(path)
+
+    # Resolve preset template → selected_templates
+    if template_id and not selected_templates:
+        tmpl = ConfigDAO.get_project_template(template_id)
+        if tmpl:
+            selected_templates = tmpl.get("agents", [])
+            log.info("Project %s: using template %s → agents=%s",
+                     name, template_id, selected_templates)
+        else:
+            log.warning("Project %s: template %s not found", name, template_id)
+
+    if selected_templates:
+        # ── User selected specific templates ──
+        # 1. Create momo first
+        _init_momo_if_needed(path)
+        momo_id = dao.get_momo_id()
+
+        # 2. Instantiate each selected template
+        created_ids: list[str] = []
+        for tmpl_id in selected_templates:
+            try:
+                cfg = dao.create_agent(
+                    agent_id=tmpl_id,     # use template id as agent id
+                    template_id=tmpl_id,
+                )
+                created_ids.append(cfg.id)
+                log.info("Project %s: created agent %s from template %s",
+                         name, cfg.id, tmpl_id)
+            except Exception as exc:
+                log.warning("Project %s: failed to create agent from %s: %s",
+                            name, tmpl_id, exc)
+
+        # 3. Write team.yaml — momo as leader, all created agents as members
+        if momo_id:
+            all_members = [momo_id] + created_ids
+            dao.write_team_yaml(momo_id, all_members)
+            log.info("Project %s: team.yaml written — leader=%s members=%s",
+                     name, momo_id, all_members)
+    else:
+        # ── Legacy: auto-create only momo ──
+        _init_momo_if_needed(path)
 
     project = await create_project(name, path, display_name)
     log.info("Project created: %s at %s", name, path)

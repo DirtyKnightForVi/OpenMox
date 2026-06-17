@@ -1,13 +1,20 @@
 """
 CallAgentTool — register other agents as callable Tools.
 
+.. deprecated::
+    Use TeamSay instead.  TeamSay routes through AgentScope's native
+    InboxMiddleware + WakeupDispatcher, providing the full middleware
+    chain (ContextSeeding, Onboarding, MemoryCapture) for the callee.
+    CallAgentTool bypasses all middleware and uses a hard-coded project
+    path, making it unsuitable for multi-project setups.
+
 When an agent has CallAgentTool in its toolkit, the LLM can function-call
 another agent by name:
 
     call_agent(agent_id="product-manager", message="分析这个需求")
-
-This is the core mechanism for scenario 4 (Agent-as-dispatcher).
 """
+
+import warnings
 
 from typing import Any
 
@@ -17,6 +24,12 @@ from agentscope.message import Msg
 
 
 class CallAgentTool(ToolBase):
+    """.. deprecated:: Use TeamSay instead.
+
+    Call another AI colleague for their professional opinion.
+    Registered per-colleague so the LLM sees each agent's name and
+    description as a distinct tool in the function-calling menu.
+    """
     """Call another AI colleague for their professional opinion.
 
     Registered per-colleague so the LLM sees each agent's name and

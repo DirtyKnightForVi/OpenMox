@@ -157,19 +157,19 @@ class OnboardingMiddleware(MiddlewareBase):
             except Exception:
                 pass  # dashboard unavailable → skip quietly
 
-        # Memory injection
+        # Memory injection — read from Markdown files (not SQLite).
+        # SQLite is the cloud; MEMORY.md is the local file.
+        # Sync is handled by MemorySyncMiddleware (local→cloud)
+        # and POST /api/memory/{id}/sync (cloud→local).
         try:
-            from . import store as mem_store
-            private = await mem_store.list_memory(
-                agent_id=agent.name, scope="private", limit=15,
-            )
-            shared = await mem_store.list_memory(
-                agent_id=None, scope="shared", limit=10,
-            )
-            if private:
-                additions.append(_format_private_memories(private))
-            if shared:
-                additions.append(_format_shared_memories(shared))
+            from ..dao import ConfigDAO
+            dao = ConfigDAO(".")
+            project_memo = dao.get_project_memo()
+            if project_memo.strip():
+                # Keep only the first 2000 chars to avoid token bloat
+                additions.append("## 项目共识\n" + project_memo[:2000])
+        except Exception:
+            pass
         except Exception:
             pass  # memory unavailable → skip quietly
 

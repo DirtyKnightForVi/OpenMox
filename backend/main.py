@@ -137,8 +137,15 @@ async def lifespan(app: FastAPI):
         #    for ContextSeedingMiddleware + WindowPublishMiddleware.
         from agentscope.app._service._chat import ChatService
         from src.core.openmox_toolkit import (
-            build_openmox_tools_factory,
+            make_tools_factory,
             make_middleware_factory,
+        )
+        # Capture storage + message_bus in a closure so the tools factory
+        # (which ChatService calls with only user_id/agent_id/session_id)
+        # can pass them through to tool constructors.
+        tools_factory = make_tools_factory(
+            storage=storage,
+            message_bus=message_bus,
         )
         # Capture message_bus + project_root in a closure so the middleware
         # factory (which ChatService calls with only user_id/agent_id/session_id)
@@ -154,7 +161,7 @@ async def lifespan(app: FastAPI):
             scheduler_manager=scheduler,
             background_task_manager=bg_manager,
             message_bus=message_bus,
-            extra_agent_tools=build_openmox_tools_factory,
+            extra_agent_tools=tools_factory,
             extra_agent_middlewares=middleware_factory,
         )
         app.state.chat_service = chat_service

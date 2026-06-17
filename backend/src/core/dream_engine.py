@@ -239,19 +239,22 @@ def _rule_extract_context(messages: list[dict]) -> list[str]:
 # ═══════════════════════════════════════════════════════
 
 async def _call_llm(system_prompt: str, user_content: str) -> str:
-    """Call cheapest model for extraction using the same API credentials."""
-    from ..core.agent_factory import get_model
+    """Call the model for extraction using runtime credentials.
+
+    Uses get_settings() for API key (environment variables, always current)
+    rather than the model singleton's credential (cached at startup).
+    """
+    from ..core.settings import get_settings
     import httpx
 
-    model = get_model()
-    # Access the model's internal OpenAI client + model name
-    url = f"{model.credential.base_url.rstrip('/')}/chat/completions"
+    s = get_settings()
+    url = f"{s.deepseek_base_url.rstrip('/')}/chat/completions"
     headers = {
-        "Authorization": f"Bearer {model.credential.api_key}",
+        "Authorization": f"Bearer {s.deepseek_api_key}",
         "Content-Type": "application/json",
     }
     payload = {
-        "model": model.model,
+        "model": s.deepseek_model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},

@@ -27,6 +27,7 @@ from .models import (
 
 TEMPLATES_DIR = Path("Agent_Sets")
 SKILLS_DIR = Path("Skills")
+PROJECT_TEMPLATES_DIR = Path("Project_Templates")
 
 
 class ConfigDAO:
@@ -144,6 +145,7 @@ class ConfigDAO:
                 description=data.get("description", ""),
                 template=data.get("template", d.name),
                 is_momo=(d.name == momo_id),
+                capabilities=data.get("capabilities", []),
             ))
         return result
 
@@ -162,6 +164,7 @@ class ConfigDAO:
             system=data.get("system", ""),
             rules=data.get("rules", []),
             skills=data.get("skills", []),
+            capabilities=data.get("capabilities", []),
             shendu_prompt=data.get("shendu_prompt", ""),
         )
 
@@ -286,6 +289,48 @@ class ConfigDAO:
             momo_file.unlink()
 
     # ═══════════════════════════════════════════════════
+    # Project: Team configuration (.Project/team.yaml)
+    # ═══════════════════════════════════════════════════
+
+    def read_team_yaml(self) -> dict | None:
+        """Read .Project/team.yaml, return None if missing."""
+        f = self.project_dir / "team.yaml"
+        if not f.exists():
+            return None
+        return self._read_yaml(f)
+
+    def write_team_yaml(self, leader: str, member_ids: list[str]) -> None:
+        """Write .Project/team.yaml with leader + member list."""
+        self.project_dir.mkdir(parents=True, exist_ok=True)
+        self._write_yaml(self.project_dir / "team.yaml", {
+            "leader": leader,
+            "members": member_ids,
+        })
+
+    def add_team_member(self, agent_id: str) -> None:
+        """Append an agent to the team member list."""
+        data = self.read_team_yaml() or {}
+        members: list[str] = list(data.get("members", []))
+        if agent_id not in members:
+            members.append(agent_id)
+            leader = data.get("leader") or self.get_momo_id() or ""
+            self.write_team_yaml(leader, members)
+
+    def remove_team_member(self, agent_id: str) -> None:
+        """Remove an agent from the team member list."""
+        data = self.read_team_yaml() or {}
+        members: list[str] = list(data.get("members", []))
+        if agent_id in members:
+            members.remove(agent_id)
+            leader = data.get("leader") or self.get_momo_id() or ""
+            self.write_team_yaml(leader, members)
+
+    def get_team_leader(self) -> str | None:
+        """Return the team leader agent_id from team.yaml, or None."""
+        data = self.read_team_yaml()
+        return data.get("leader") if data else None
+
+    # ═══════════════════════════════════════════════════
     # Project: Config
     # ═══════════════════════════════════════════════════
 
@@ -326,6 +371,40 @@ class ConfigDAO:
     # ═══════════════════════════════════════════════════
     # Lifecycle
     # ═══════════════════════════════════════════════════
+
+    # ═══════════════════════════════════════════════════
+    # Global: Project Templates
+    # ═══════════════════════════════════════════════════
+
+    @staticmethod
+    def list_project_templates() -> list[dict]:
+        """List available project templates from Project_Templates/."""
+        if not PROJECT_TEMPLATES_DIR.exists():
+            return []
+        result = []
+        for f in sorted(PROJECT_TEMPLATES_DIR.glob("*.yaml")):
+            data = ConfigDAO._read_yaml(f)
+            result.append({
+                "id": f.stem,
+                "name": data.get("name", f.stem),
+                "description": data.get("description", ""),
+                "agents": data.get("agents", []),
+            })
+        return result
+
+    @staticmethod
+    def get_project_template(template_id: str) -> dict | None:
+        """Return a single project template, or None."""
+        f = PROJECT_TEMPLATES_DIR / f"{template_id}.yaml"
+        if not f.exists():
+            return None
+        data = ConfigDAO._read_yaml(f)
+        return {
+            "id": template_id,
+            "name": data.get("name", template_id),
+            "description": data.get("description", ""),
+            "agents": data.get("agents", []),
+        }
 
     @staticmethod
     def init_project(project_root: str | Path) -> None:

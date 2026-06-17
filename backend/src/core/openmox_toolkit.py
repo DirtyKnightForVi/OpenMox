@@ -11,7 +11,6 @@ Also: build_openmox_tools() — legacy FanoutStreamer path (synchronous, depreca
 from ..dao import ConfigDAO
 from ..dao.dashboard_dao import DashboardDAO
 from .agent_factory import OnboardingMiddleware
-from .call_agent import build_call_agent_tools
 from .dashboard_tools import build_dashboard_tools
 from .agent_from_template_tool import AgentFromTemplateTool
 from ..memory.capture import MemoryCaptureMiddleware
@@ -67,10 +66,9 @@ def build_openmox_tools(
         except Exception:
             pass
 
-    # CallAgent tools (momo only)
-    if is_momo:
-        call_tools = build_call_agent_tools(project_root)
-        extra_tools.extend(t for t in call_tools if t.target_agent_id != agent_id)
+    # Note: CallAgentTool is deprecated. Use TeamSay for agent-to-agent
+    # communication (routes through InboxMiddleware + WakeupDispatcher
+    # for full middleware chain support).
 
     # ── Middlewares ───────────────────────────
     onboarding = dao.get_onboarding_context()
@@ -132,55 +130,62 @@ async def _resolve_project_path(session_id: str) -> str:
     return "."
 
 
-async def build_openmox_tools_factory(
-    user_id: str,
-    agent_id: str,
-    session_id: str,
-) -> list:
-    """Async factory matching ChatService.extra_agent_tools signature.
+def make_tools_factory(
+    *,
+    storage,
+    message_bus,
+):
+    """Return an async factory for ChatService.extra_agent_tools.
 
-    Returns OpenMox-specific tools (Dashboard, CallAgent, AgentFromTemplate)
-    for a given (user_id, agent_id, session_id) tuple.
+    The returned factory captures ``storage`` and ``message_bus`` via
+    closure so ChatService's factory signature ``(user_id, agent_id,
+    session_id)`` can pass them through to tool constructors.
 
-    Storage and MessageBus are injected by ChatService via the tools'
-    __init__ — this factory only needs to return tool instances that
-    will be properly constructed by ChatService's toolkit assembly.
+    Usage in main.py lifespan::
+
+        tools_factory = make_tools_factory(storage=storage, message_bus=message_bus)
+        chat_service = ChatService(..., extra_agent_tools=tools_factory)
     """
-    project_path = await _resolve_project_path(session_id)
-    dao = ConfigDAO(project_path)
-    is_momo = dao.is_momo(agent_id)
-    project_root = str(dao.root)
 
-    tools: list = []
+    async def _factory(user_id: str, agent_id: str, session_id: str) -> list:
+        project_path = await _resolve_project_path(session_id)
+        dao = ConfigDAO(project_path)
+        is_momo = dao.is_momo(agent_id)
+        project_root = str(dao.root)
 
-    # Dashboard tools
-    try:
-        tools.extend(build_dashboard_tools(
-            storage=None, message_bus=None,
-            agent_id=agent_id, is_momo=is_momo, window_id=session_id,
-        ))
-    except Exception:
-        pass
+        tools: list = []
 
-    # AgentFromTemplate (momo only)
-    if is_momo:
+        # Dashboard tools
         try:
-            tools.append(AgentFromTemplateTool(
-                storage=None, message_bus=None,
-                user_id=user_id, session_id=session_id,
-                agent_id=agent_id, is_momo=True,
+            tools.extend(build_dashboard_tools(
+                storage=storage, message_bus=message_bus,
+                agent_id=agent_id, is_momo=is_momo, window_id=session_id,
             ))
         except Exception:
             pass
 
-        call_tools = build_call_agent_tools(project_root)
-        tools.extend(t for t in call_tools if t.target_agent_id != agent_id)
+        # AgentFromTemplate (momo only)
+        if is_momo:
+            try:
+                tools.append(AgentFromTemplateTool(
+                    storage=storage, message_bus=message_bus,
+                    user_id=user_id, session_id=session_id,
+                    agent_id=agent_id, is_momo=True,
+                ))
+            except Exception:
+                pass
 
-    log.info(
-        "extra_tools factory: agent=%s session=%s project=%s tools=%d momo=%s",
-        agent_id, session_id[:20], project_root, len(tools), is_momo,
-    )
-    return tools
+        log.info(
+            "extra_tools factory: agent=%s session=%s project=%s tools=%d momo=%s",
+            agent_id, session_id[:20], project_root, len(tools), is_momo,
+        )
+        return tools
+
+    return _factory
+
+
+# Legacy alias — kept for backward ref compatibility in chat.py comments
+build_openmox_tools_factory = None  # replaced by make_tools_factory()
 
 
 def make_middleware_factory(
@@ -216,6 +221,7 @@ def make_middleware_factory(
     from .context_seeding_middleware import ContextSeedingMiddleware
     from .window_publish_middleware import WindowPublishMiddleware
     from .communication_budget_middleware import CommunicationBudgetMiddleware
+    from .memory_sync_middleware import MemorySyncMiddleware
 
     async def _factory(user_id: str, agent_id: str, session_id: str) -> list:
         project_path = await _resolve_project_path(session_id)
@@ -249,6 +255,10 @@ def make_middleware_factory(
                 agent_id=agent_id,
                 window_id=window_id,
                 momo_id=momo_id,
+            ),
+            MemorySyncMiddleware(
+                agent_id=agent_id,
+                project_root=proj_root,
             ),
             WindowPublishMiddleware(
                 message_bus=message_bus,

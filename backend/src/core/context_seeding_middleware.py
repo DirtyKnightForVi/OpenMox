@@ -59,11 +59,12 @@ class ContextSeedingMiddleware(MiddlewareBase):
         max_count: int = 30,
     ) -> None:
         self._bus = message_bus
-        self._window_id = window_id
         self._agent_id = agent_id
         self._is_momo = is_momo
         self._max_count = max_count
-        self._window_key = f"window:{window_id}:events"
+        # Extract bare window_id from session format "web_s_xxx:momo"
+        self._window_id = window_id.rsplit(":", 1)[0] if ":" in window_id else window_id
+        self._window_key = f"window:{self._window_id}:events"
 
     # ── AgentScope on_reply hook ───────────────────────
 
@@ -79,9 +80,16 @@ class ContextSeedingMiddleware(MiddlewareBase):
         onboarding messages — avoids double-seeding on retriggers.
         """
         # ── Read window stream ──────────────────────
+        # momo: read max_count events (full situational awareness).
+        # worker: read up to max_count * 3, filter to find self-relevant
+        # events, and keep interleaving context between them.
+        read_count = self._max_count
+        if not self._is_momo:
+            read_count = min(self._max_count * 3, 200)
+
         try:
             entries = await self._bus.log_read(
-                self._window_key, max_count=self._max_count,
+                self._window_key, max_count=read_count,
             )
         except Exception:
             log.debug(
@@ -89,6 +97,10 @@ class ContextSeedingMiddleware(MiddlewareBase):
                 self._window_key[:40],
             )
             entries = []
+
+        # ── For worker: filter to relevant + interleaving context ──
+        if not self._is_momo and entries:
+            entries = _truncate_for_worker(entries, self._agent_id, self._max_count)
 
         # ── Filter + format ─────────────────────────
         hints: list[HintBlock] = []
@@ -205,3 +217,57 @@ class ContextSeedingMiddleware(MiddlewareBase):
             return f"✅ {agent_id} 工具{'完成' if state == 'success' else '失败'}"
 
         return ""
+
+
+# ── Worker context truncation ──────────────────────
+
+
+def _is_relevant(event: dict, agent_id: str) -> bool:
+    """Return True if this event involves the given agent.
+
+    The event is relevant if: it's a human_message, or the agent_id
+    appears anywhere in the serialized payload.
+    """
+    t = event.get("type", "")
+    if t == "human_message":
+        return True
+    payload_str = json.dumps(event, ensure_ascii=False)
+    return agent_id in payload_str
+
+
+def _truncate_for_worker(
+    entries: list,
+    agent_id: str,
+    max_total: int,
+) -> list:
+    """Keep entries that are relevant to this worker, plus interleaving
+    context between them.  Read from the end (most recent), keep at most
+    max_total entries total.
+
+    Strategy:
+      1. Walk entries from end to start.
+      2. Track the gap since the last relevant entry.
+      3. Keep relevant entries + up to 2 interleaving entries between them.
+      4. Stop when we've kept max_total entries total.
+    """
+    if not entries:
+        return entries
+
+    kept: list = []
+    gap: list = []
+    max_gap = 2  # keep at most 2 interleaving messages between relevant ones
+
+    for _entry_id, payload in reversed(entries):
+        if _is_relevant(payload, agent_id):
+            # Flush gap (keep at most max_gap interleaving)
+            kept.extend(reversed(gap[-max_gap:]))
+            gap = []
+            kept.append((_entry_id, payload))
+        else:
+            gap.append((_entry_id, payload))
+
+    # Reverse back to chronological order
+    kept.reverse()
+    # Cap at max_total
+    return kept[-max_total:]
+

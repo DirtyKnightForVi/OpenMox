@@ -27,6 +27,7 @@ class AgentSummary:
     description: str
     template: str = ""
     is_momo: bool = False
+    capabilities: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -34,6 +35,7 @@ class AgentConfig(AgentSummary):
     system: str = ""
     rules: list[str] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
+    capabilities: list[str] = field(default_factory=list)
     shendu_prompt: str = ""
 
 

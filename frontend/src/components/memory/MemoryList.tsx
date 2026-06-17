@@ -7,12 +7,13 @@ import type { MemoryEntry } from "@/lib/types";
 interface MemoryListProps {
   entries: MemoryEntry[];
   title: string;
+  emptyMessage?: string;
   onPin?: (entry: MemoryEntry) => void;
   onSaveEdit?: (entry: MemoryEntry, content: string) => void;
   onDelete?: (entry: MemoryEntry) => void;
 }
 
-export function MemoryList({ entries, title, onPin, onSaveEdit, onDelete }: MemoryListProps) {
+export function MemoryList({ entries, title, emptyMessage, onPin, onSaveEdit, onDelete }: MemoryListProps) {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editContent, setEditContent] = useState("");
 
@@ -31,7 +32,7 @@ export function MemoryList({ entries, title, onPin, onSaveEdit, onDelete }: Memo
       <h2 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3">{title}</h2>
       <div className="space-y-2">
         {entries.length === 0 ? (
-          <p className="text-xs text-text-muted italic">No entries yet.</p>
+          <p className="text-xs text-text-muted italic">{emptyMessage || "No entries yet."}</p>
         ) : (
           entries.map((entry) =>
             editingId === entry.id ? (

@@ -5,7 +5,20 @@ import { motion } from "motion/react";
 import { clsx } from "clsx";
 import { CaretDown, Brain } from "@phosphor-icons/react";
 import { AgentAvatar } from "@/components/agents/AgentAvatar";
+import { getAgentColor } from "@/components/agents/AgentColorMap";
 import type { ChatMessage } from "@/lib/types";
+
+/** Map from getAgentColor dot class → inline border color hex */
+const AGENT_BORDER_COLORS: Record<string, string> = {
+  "bg-blue-500": "#3b82f6",
+  "bg-amber-500": "#f59e0b",
+  "bg-indigo-500": "#6366f1",
+  "bg-rose-500": "#f43f5e",
+  "bg-emerald-500": "#10b981",
+  "bg-purple-500": "#a855f7",
+  "bg-cyan-500": "#06b6d4",
+  "bg-orange-500": "#f97316",
+};
 
 interface ChatBubbleProps {
   message: ChatMessage;
@@ -17,6 +30,7 @@ export function ChatBubble({ message, isStreaming }: ChatBubbleProps) {
   const isSystem = message.sender === "system";
   const hasThinking = !!message.thinkingText;
   const [thinkingOpen, setThinkingOpen] = useState(false);
+  const agentColor = isUser || isSystem ? null : getAgentColor(message.sender);
 
   return (
     <motion.div
@@ -37,11 +51,12 @@ export function ChatBubble({ message, isStreaming }: ChatBubbleProps) {
         <div
           className={clsx(
             "max-w-[75%] rounded-xl px-4 py-2.5 text-sm leading-relaxed border border-border/50 bubble-agent",
-            message.sender === "momo" && "border-l-4 border-l-blue-400",
-            message.sender === "product-manager" && "border-l-4 border-l-amber-400",
-            message.sender === "dev-manager" && "border-l-4 border-l-indigo-400",
-            message.sender === "arch-manager" && "border-l-4 border-l-rose-400",
           )}
+          style={
+            agentColor
+              ? { borderLeft: `4px solid ${AGENT_BORDER_COLORS[agentColor.dot] || "#94a3b8"}` }
+              : undefined
+          }
         >
           {/* Agent header */}
           <div className="flex items-center gap-2 mb-1.5">

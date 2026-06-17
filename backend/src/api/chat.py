@@ -178,6 +178,16 @@ async def _handle_command(
 
     user_id = "openmox"
 
+    # ── Ensure project Team for TeamSay communication ──
+    # Reads/creates .Project/team.yaml, registers agents,
+    # creates window-scoped sessions, binds them to the Team.
+    await _ensure_project_team(
+        storage=storage,
+        user_id=user_id,
+        window_id=window_id,
+        project_path=project_path,
+    )
+
     # ── Default routing to momo ────────────────────
     if not mentioned:
         from ..dao import ConfigDAO
@@ -320,10 +330,17 @@ async def _handle_command(
         sub_ready = asyncio.Event()
         text_parts: list[str] = []
 
+        # Extract agent_id from session_id for event tagging.
+        # Session format: "{window_id}:{agent_id}"
+        _current_agent = session_id.rsplit(":", 1)[-1] if ":" in session_id else ""
+
         async def _collect():
             async for payload in message_bus.session_subscribe_events(
                 session_id, on_ready=sub_ready.set,
             ):
+                # Inject _agent_id so frontend / tests can group events by agent
+                if _current_agent and "_agent_id" not in payload:
+                    payload["_agent_id"] = _current_agent
                 # Forward every event to WebSocket directly
                 await _safe_send(ws, payload)
                 if payload.get("type") == "TEXT_BLOCK_DELTA":
@@ -334,6 +351,13 @@ async def _handle_command(
         collector_task = asyncio.create_task(_collect())
         await asyncio.wait_for(sub_ready.wait(), timeout=5.0)
         await asyncio.sleep(0)  # let collector enter async-for
+
+        # ── Push agent:busy to WebSocket ─────────
+        await _safe_send(ws, {
+            "type": "agent:busy",
+            "_agent_id": agent_id,
+            "_timestamp": time.time(),
+        })
 
         log.info("_run_one: entering chat_service.run() session=%s", session_id[:30])
         try:
@@ -358,6 +382,13 @@ async def _handle_command(
             await asyncio.wait_for(collector_task, timeout=10.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
+
+        # ── Push agent:idle to WebSocket ──────────
+        await _safe_send(ws, {
+            "type": "agent:idle",
+            "_agent_id": agent_id,
+            "_timestamp": time.time(),
+        })
 
         full_text = "".join(text_parts)
         return {"agent_id": agent_id, "text": full_text}
@@ -405,6 +436,131 @@ async def _handle_command(
                     ws, chain_msg, mention_router,
                     window_id, project_path, _chain_depth + 1,
                 )
+
+
+# ── Team management ─────────────────────────────────
+
+# Track Windows that already have sessions bound to their project Team.
+_bound_windows: set[str] = set()
+
+
+async def _ensure_project_team(
+    *,
+    storage,
+    user_id: str,
+    window_id: str,
+    project_path: str,
+) -> str | None:
+    """Ensure this project has an AgentScope Team for TeamSay communication.
+
+    1. Read .Project/team.yaml.  If missing, auto-create from .Agents/ agents.
+    2. Create the corresponding AgentScope Team in Redis (if not exists).
+    3. Bind every agent's window-scoped session to the Team.
+    4. Return the team_id, or None if the project has fewer than 2 agents.
+
+    Idempotent — subsequent calls for the same window are no-ops.
+    """
+    if window_id in _bound_windows:
+        # Return the already-bound team_id from the first session.
+        momo_id = _get_momo_for_project(project_path)
+        if momo_id:
+            sess = await storage.get_session(
+                user_id, momo_id, f"{window_id}:{momo_id}",
+            )
+            if sess and sess.team_id:
+                return sess.team_id
+        return None
+
+    from ..dao import ConfigDAO
+    from agentscope.app.storage import (
+        TeamRecord, TeamData, SessionConfig, SessionSource,
+        ChatModelConfig,
+    )
+    from ..core.settings import get_settings
+
+    dao = ConfigDAO(project_path)
+    agents = dao.list_agents()
+    if len(agents) < 2:
+        log.info("Team: project %s has <2 agents, skipping",
+                 project_path[-30:])
+        return None
+
+    momo_id = dao.get_momo_id()
+    if not momo_id:
+        log.warning("Team: no momo configured for %s", project_path[-30:])
+        return None
+
+    # ── Read or create team.yaml ──────────────────
+    team_cfg = dao.read_team_yaml()
+    if team_cfg is None:
+        # Auto-create: all agents as members, momo as leader.
+        member_ids = [a.id for a in agents]
+        dao.write_team_yaml(momo_id, member_ids)
+        log.info("Team: auto-created team.yaml — leader=%s members=%s",
+                 momo_id, member_ids)
+        team_cfg = {"leader": momo_id, "members": member_ids}
+
+    leader_id = team_cfg.get("leader", momo_id)
+    member_ids: list[str] = list(team_cfg.get("members", []))
+
+    log.info("Team: window=%s leader=%s members=%s",
+             window_id[:30], leader_id, member_ids)
+
+    # ── Register agents + create sessions ─────────
+    s = get_settings()
+    model_cfg = ChatModelConfig(
+        type="deepseek_chat",
+        credential_id="default",
+        model=s.deepseek_model,
+        parameters={},
+    )
+
+    all_ids = list(dict.fromkeys([leader_id] + member_ids))
+    for aid in all_ids:
+        await storage.ensure_agent_from_path(user_id, aid, project_path)
+        session_id = f"{window_id}:{aid}"
+        await storage.upsert_session(
+            user_id, aid,
+            config=SessionConfig(
+                workspace_id="default",
+                chat_model_config=model_cfg,
+            ),
+            session_id=session_id,
+            source=SessionSource.USER,
+        )
+
+    # ── Create/update Team in Redis ───────────────
+    # Use leader's session as the Team's anchor session.
+    leader_session = f"{window_id}:{leader_id}"
+    team = TeamRecord(
+        user_id=user_id,
+        session_id=leader_session,
+        data=TeamData(
+            name=f"OpenMox ({project_path.split('/')[-1]})",
+            description="Multi-agent collaborative project",
+            member_ids=[],
+        ),
+    )
+    await storage.upsert_team(user_id, team)
+
+    for aid in all_ids:
+        session_id = f"{window_id}:{aid}"
+        await storage.set_session_team_id(user_id, session_id, team.id)
+        team.data.member_ids.append(aid)
+
+    await storage.upsert_team(user_id, team)
+    _bound_windows.add(window_id)
+
+    log.info("Team: ready — team=%s sessions=%d",
+             team.id[:12], len(all_ids))
+    return team.id
+
+
+def _get_momo_for_project(project_path: str) -> str | None:
+    """Quick lookup: return the momo agent_id for a project."""
+    from ..dao import ConfigDAO
+    dao = ConfigDAO(project_path)
+    return dao.get_momo_id()
 
 
 # ── Helpers ────────────────────────────────────────────

@@ -36,6 +36,7 @@ export interface Task {
   blocked_reason: string;
   created_at: string;
   completed_at: string;
+  communication_budget?: number;
 }
 
 export interface DashboardResponse {
@@ -86,4 +87,29 @@ export interface ChatStreamEvent {
   _source?: string;
   _hint?: string;
   _timestamp: number;
+}
+
+// ── Agent status tracking ──
+
+export type AgentConnectionStatus = 'idle' | 'busy';
+
+export interface ToolCallEvent {
+  name: string;
+  _source?: string;
+  _timestamp: number;
+  state?: string;
+}
+
+export interface WorkDetail {
+  toolCalls: ToolCallEvent[];
+  thinkingBlocks: { delta: string; _timestamp: number }[];
+  currentTask?: string;
+}
+
+// ── Window / Topic management ──
+
+export interface WindowTab {
+  id: string;
+  label: string;
+  projectName: string;
 }

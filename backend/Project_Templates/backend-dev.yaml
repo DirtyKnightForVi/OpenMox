@@ -1,0 +1,6 @@
+# 后端开发项目 — 预设 Agent 组合
+name: "后端开发项目"
+description: "含架构经理 + 开发经理 + 项目协调者，适合 Python/Go 后端项目"
+agents:
+  - arch-manager
+  - dev-manager
