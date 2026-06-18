@@ -31,6 +31,10 @@ export async function createProject(name: string, path: string, display_name?: s
   });
 }
 
+export async function deleteProject(name: string) {
+  return fetchAPI<{ ok: boolean }>(`/projects/${name}`, { method: "DELETE" });
+}
+
 // ── Agents ─────────────────────────────────────────────
 
 export async function listAgents(projectKey?: string) {

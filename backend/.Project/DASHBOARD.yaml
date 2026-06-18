@@ -1,5 +1,5 @@
 version: 1
-updated_at: '2026-06-17T22:00:03'
+updated_at: '2026-06-18T16:23:00'
 tasks:
 - id: task-b997934f
   title: 面膜广告产品构思
@@ -14,4 +14,4 @@ tasks:
   completed_at: ''
   output: ''
   blocked_reason: ''
-  communication_budget: 4
+  communication_budget: 3

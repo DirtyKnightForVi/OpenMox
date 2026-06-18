@@ -161,6 +161,7 @@ def _resolve_project_from_agents(agent_ids: list[str]) -> str:
     if not agent_ids:
         return "."
     import sqlite3
+    from ..dao import ConfigDAO
     try:
         db = sqlite3.connect("data/openmox.db")
         db.row_factory = sqlite3.Row
@@ -244,12 +245,18 @@ async def _handle_command(
     # ── Ensure project Team for TeamSay communication ──
     # Reads/creates .Project/team.yaml, registers agents,
     # creates window-scoped sessions, binds them to the Team.
-    await _ensure_project_team(
+    team_id = await _ensure_project_team(
         storage=storage,
         user_id=user_id,
         window_id=window_id,
         project_path=project_path,
     )
+    if team_id:
+        log.info("Team set up: team_id=%s user_id=%s window=%s",
+                 team_id[:12], user_id, window_id[:20])
+    else:
+        log.warning("Team NOT set up for user_id=%s window=%s",
+                     user_id, window_id[:20])
 
     # ── Default routing to momo ────────────────────
     if not mentioned:
@@ -364,6 +371,29 @@ async def _handle_command(
             parameters={"thinking_enable": os.environ.get("OPENMOX_THINKING", "").lower() in ("1", "true", "yes")},
         )
 
+        # Reset the agent state for a fresh user-initiated run.
+        # AgentScope persists the previous run's state (including
+        # pending tool calls in context), and if the previous run
+        # left tool calls in stale states, _check_incoming_event
+        # rejects new messages with "Agent is waiting for N tool
+        # calls and received no event."
+        #
+        # Context is cleared here and rebuilt by
+        # ContextSeedingMiddleware from the window stream.
+        try:
+            old_session = await storage.get_session(
+                user_id, agent_id, session_id,
+            )
+            if old_session and old_session.state:
+                old_session.state.context = []
+                old_session.state.reply_id = ""
+                old_session.state.cur_iter = 0
+                await storage.update_session_state(
+                    user_id, agent_id, session_id, old_session.state,
+                )
+        except Exception:
+            pass
+
         await storage.upsert_session(
             user_id, agent_id,
             config=SessionConfig(
@@ -435,6 +465,15 @@ async def _handle_command(
             "_timestamp": time.time(),
         })
 
+        # Debug: check session team_id before running
+        try:
+            sess = await storage.get_session(user_id, agent_id, session_id)
+            _tid = sess.team_id if sess else None
+            log.info("_run_one: session team_id=%s session=%s",
+                     (_tid[:12] if _tid else 'None'), session_id[:30])
+        except Exception:
+            pass
+
         _t0 = time.time()
         log.info("_run_one: entering chat_service.run() session=%s", session_id[:30])
         _chat_error = None
@@ -488,13 +527,68 @@ async def _handle_command(
 
         full_text = "".join(text_parts)
 
-        # ── Guard: if agent produced no visible text, push a fallback ──
+        # ── Force summary: if agent called tools but produced no text,
+        #     give it one more round with a "please summarize" prompt ──
+        if not full_text.strip() and not _chat_error:
+            log.info(
+                "_run_one: agent=%s produced no text, forcing summary",
+                agent_id,
+            )
+            try:
+                from agentscope.message import Msg, TextBlock
+                summary_prompt = Msg(
+                    name="user",
+                    content=[TextBlock(
+                        text="请用文字总结你刚才完成的工作。你做了哪些操作？结果是什么？"
+                    )],
+                    role="user",
+                )
+                # Reset collector for the summary round
+                summary_text: list[str] = []
+                _sub_ready2 = asyncio.Event()
+
+                async def _collect2():
+                    async for payload in message_bus.session_subscribe_events(
+                        session_id, on_ready=_sub_ready2.set,
+                    ):
+                        etype = payload.get("type", "?")
+                        if _current_agent and "_agent_id" not in payload:
+                            payload["_agent_id"] = _current_agent
+                        await _safe_send(ws, payload)
+                        if etype == "TEXT_BLOCK_DELTA":
+                            summary_text.append(payload.get("delta", ""))
+                        elif etype == "REPLY_END":
+                            return
+
+                collector2 = asyncio.create_task(_collect2())
+                await asyncio.wait_for(_sub_ready2.wait(), timeout=5.0)
+                await asyncio.sleep(0)
+
+                await chat_service.run(
+                    user_id=user_id,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    input_msg=summary_prompt,
+                )
+                collector2.cancel()
+                try:
+                    await collector2
+                except asyncio.CancelledError:
+                    pass
+                full_text = "".join(summary_text) or full_text
+            except Exception as e:
+                log.warning(
+                    "_run_one: summary round failed for %s: %s",
+                    agent_id, e,
+                )
+
+        # ── Guard: if still no text after summary attempt ──
         if not full_text.strip():
             await _safe_send(ws, {
                 "type": "system_message",
                 "content": (
                     f"Agent「{agent_id}」已完成执行但未生成文本回复。"
-                    f"可能是工具调用后未进行总结。请重试或检查 Agent 的 system prompt。"
+                    f"可能是工具调用后未进行总结。请重试。"
                 ),
             })
 
