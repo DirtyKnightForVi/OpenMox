@@ -76,6 +76,10 @@ export function useChat() {
 
       if (type === "agent:idle") {
         setAgentStatus(agentId || "unknown", "idle");
+        // Reset work detail — agent has finished its current task
+        if (agentId) {
+          updateWorkDetail(agentId, { currentTask: undefined });
+        }
         return;
       }
 
@@ -147,6 +151,15 @@ export function useChat() {
       if (type === "TOOL_CALL_END") {
         const toolName = data.name || "tool";
         appendToLastMessage(agentId || "assistant", ` [🔧 ${toolName}] `);
+        // Populate agent work detail so AgentPanel can show active tool calls
+        if (agentId) {
+          addToolCallToAgent(agentId, {
+            name: toolName,
+            _source: data._source,
+            _timestamp: data._timestamp || Date.now(),
+          });
+          updateWorkDetail(agentId, { currentTask: `🔧 ${toolName}` });
+        }
         return;
       }
 
@@ -156,6 +169,17 @@ export function useChat() {
           appendToLastMessage(agentId || "assistant", " ✅");
         } else if (state === "error" || state === "denied") {
           appendToLastMessage(agentId || "assistant", " ❌");
+        }
+        // Update work detail with tool result state
+        if (agentId) {
+          addToolCallToAgent(agentId, {
+            name: data.name || "tool",
+            state,
+            _source: data._source,
+            _timestamp: data._timestamp || Date.now(),
+          });
+          const stateLabel = state === "success" ? "✅" : "❌";
+          updateWorkDetail(agentId, { currentTask: `${stateLabel} ${data.name || "tool"}` });
         }
         return;
       }
@@ -167,7 +191,8 @@ export function useChat() {
         return;
       }
     },
-    [addMessage, appendToLastMessage, setStreaming],
+    [addMessage, appendToLastMessage, appendThinkingToLastMessage, setStreaming,
+     setAgentStatus, updateWorkDetail, addToolCallToAgent, setWsConnected],
   );
 
   const connect = useCallback(() => {

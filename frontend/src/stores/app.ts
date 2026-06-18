@@ -94,18 +94,26 @@ export const useAppStore = create<AppState>((set) => ({
   appendToLastMessage: (agentId, delta) =>
     set((s) => {
       const msgs = [...s.messages];
-      const last = msgs[msgs.length - 1];
-      if (last && last.sender === agentId) {
-        msgs[msgs.length - 1] = { ...last, text: last.text + delta };
+      // Search backward for the last message belonging to this agent.
+      // When 2+ agents reply concurrently, checking only msgs[last] would
+      // route one agent's TEXT_BLOCK_DELTA to the wrong bubble.
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].sender === agentId) {
+          msgs[i] = { ...msgs[i], text: msgs[i].text + delta };
+          break;
+        }
       }
       return { messages: msgs };
     }),
   appendThinkingToLastMessage: (agentId, delta) =>
     set((s) => {
       const msgs = [...s.messages];
-      const last = msgs[msgs.length - 1];
-      if (last && last.sender === agentId) {
-        msgs[msgs.length - 1] = { ...last, thinkingText: (last.thinkingText || "") + delta };
+      // Search backward for the last message belonging to this agent.
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].sender === agentId) {
+          msgs[i] = { ...msgs[i], thinkingText: (msgs[i].thinkingText || "") + delta };
+          break;
+        }
       }
       return { messages: msgs };
     }),

@@ -13,6 +13,7 @@ export interface Agent {
   description: string;
   template?: string;
   is_momo: boolean;
+  capabilities?: string[];
 }
 
 export interface AgentTemplate {

@@ -487,6 +487,17 @@ async def _handle_command(
             })
 
         full_text = "".join(text_parts)
+
+        # ── Guard: if agent produced no visible text, push a fallback ──
+        if not full_text.strip():
+            await _safe_send(ws, {
+                "type": "system_message",
+                "content": (
+                    f"Agent「{agent_id}」已完成执行但未生成文本回复。"
+                    f"可能是工具调用后未进行总结。请重试或检查 Agent 的 system prompt。"
+                ),
+            })
+
         return {"agent_id": agent_id, "text": full_text}
 
     # Run all agents concurrently
