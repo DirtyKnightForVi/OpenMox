@@ -458,20 +458,6 @@ async def _handle_command(
             source=SessionSource.USER,
         )
 
-        # ── Seed TaskContext from DASHBOARD (plan-execute model) ──
-        # Workers get a TaskContext with auto-injected head (claim
-        # + report_to_group) and tail (completion report_to_group).
-        # The middle tasks come from DASHBOARD.yaml.
-        _seeded_tasks = await _seed_task_context(
-            storage=storage,
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-            project_path=project_path,
-            window_id=window_id,
-            clean_msg=clean_msg,
-        )
-
         # Build input message
         from agentscope.message import Msg
         try:
@@ -582,29 +568,6 @@ async def _handle_command(
                 full_text = "\n".join(text_blocks)
         except Exception:
             pass
-
-        # ── Auto-continue: if TaskContext has pending tasks, re-wake ──
-        if not _chat_error:
-            try:
-                sess = await storage.get_session(user_id, agent_id, session_id)
-                if sess and sess.state and sess.state.tasks_context:
-                    pending = [
-                        t for t in sess.state.tasks_context.tasks
-                        if t.state == "pending"
-                    ]
-                    if pending:
-                        log.info(
-                            "_run_one: auto-continue worker=%s pending_tasks=%d",
-                            agent_id, len(pending),
-                        )
-                        # Re-enqueue wakeup — WakeupDispatcher will pick it up
-                        await message_bus.enqueue_wakeup(
-                            user_id=user_id,
-                            session_id=session_id,
-                            agent_id=agent_id,
-                        )
-            except Exception:
-                pass
 
         return {"agent_id": agent_id, "text": full_text}
 

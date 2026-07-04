@@ -77,7 +77,7 @@ class OpenMoxRedisStorage(RedisStorage):
                 name=cfg.name,
                 system_prompt=cfg.system if hasattr(cfg, 'system') else "",
                 context_config=ContextConfig(),
-                react_config=ReActConfig(max_iters=50),
+                react_config=ReActConfig(max_iters=30),
             ),
         )
 

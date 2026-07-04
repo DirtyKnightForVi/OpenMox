@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { clsx } from "clsx";
+import { useSearchParams } from "next/navigation";
 import { useAppStore } from "@/stores/app";
 import type { Task, TaskProgressEvent } from "@/lib/types";
 
@@ -17,20 +18,25 @@ interface TaskDetailPanelProps {
  *   2. Real-time work stream (SSE events from taskProgress store)
  */
 export function TaskDetailPanel({ task, isOpen }: TaskDetailPanelProps) {
-  const currentWindowId = useAppStore((s) => s.currentWindowId);
+  const searchParams = useSearchParams();
+  const storeWindowId = useAppStore((s) => s.currentWindowId);
   const taskProgress = useAppStore((s) => s.taskProgress);
-  const currentProjectPath = useAppStore((s) => s.currentProjectPath);
+  const storeProjectPath = useAppStore((s) => s.currentProjectPath);
+
+  // Resolve windowId: store first, URL fallback for old projects
+  const currentWindowId = storeWindowId || searchParams.get("window") || "";
+  // Resolve projectPath: store first, "." fallback
+  const currentProjectPath = storeProjectPath || ".";
+
   const [planTasks, setPlanTasks] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
 
   // Fetch TaskContext on open
   useEffect(() => {
-    const windowId = currentWindowId;
-    if (!isOpen || !task.owner || !windowId) return;
+    if (!isOpen || !task.owner || !currentWindowId) return;
     setLoading(true);
-    const projectPath = currentProjectPath || ".";
     fetch(
-      `/api/dashboard/tasks/${encodeURIComponent(task.owner)}?window_id=${encodeURIComponent(windowId)}&project_path=${encodeURIComponent(projectPath)}`
+      `http://localhost:8000/api/dashboard/tasks/${encodeURIComponent(task.owner)}?window_id=${encodeURIComponent(currentWindowId)}&project_path=${encodeURIComponent(currentProjectPath)}`
     )
       .then((r) => r.json())
       .then((data) => setPlanTasks(data.tasks || []))

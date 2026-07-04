@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from agentscope.app._service._chat import ChatService
 from agentscope.app._service._toolkit import get_toolkit
+from agentscope.state import Task, TaskContext
 
 if TYPE_CHECKING:
     from agentscope.app.storage import StorageBase
@@ -104,12 +105,29 @@ class OpenMoxChatService(ChatService):
 
         async def _filtered_get_toolkit(**kwargs):
             toolkit = await _original(**kwargs)
-            # Filter unwanted tools from each tool group
+
+            # Filter unwanted tools
             for group in toolkit.tool_groups:
                 group.tools = [
                     t for t in (group.tools or [])
                     if t.name not in _UNWANTED_TOOLS
                 ]
+
+            # ── Seed TaskContext (plan-execute model) ──
+            # This runs BEFORE the agent is assembled (step 3 of _run_impl),
+            # so the agent will see the seeded tasks in its state.
+            # Covers both user-initiated runs AND WakeupDispatcher wake-ups.
+            try:
+                session_record = kwargs.get("session_record")
+                agent_record = kwargs.get("agent_record")
+                if session_record and agent_record and session_record.state:
+                    await _seed_tasks_in_state(
+                        session_record=session_record,
+                        agent_record=agent_record,
+                    )
+            except Exception:
+                pass
+
             return toolkit
 
         _chat_module.get_toolkit = _filtered_get_toolkit
@@ -117,3 +135,93 @@ class OpenMoxChatService(ChatService):
             await super()._run_impl(user_id, session_id, agent_id, input_msg)
         finally:
             _chat_module.get_toolkit = _original
+
+
+async def _seed_tasks_in_state(
+    *,
+    session_record,
+    agent_record,
+) -> None:
+    """Inject plan-execute TaskContext into session state.
+
+    Called from the monkey-patched get_toolkit, which runs for EVERY
+    agent invocation (user-initiated AND WakeupDispatcher wake-ups).
+    """
+    session_id = session_record.id
+    agent_id = agent_record.id
+
+    # Extract window_id: "{window_id}:{agent_id}"
+    window_id = session_id.rsplit(":", 1)[0] if ":" in session_id else session_id
+
+    # Resolve project_path from WebSocket registry
+    project_path = "."
+    try:
+        from .ws_registry import get_project_path
+        # Try full session_id first, then bare window_id
+        pp = await get_project_path(session_id)
+        if not pp:
+            pp = await get_project_path(window_id)
+        if pp:
+            project_path = pp
+    except Exception:
+        pass
+
+    if project_path == ".":
+        return  # Can't seed without project context
+
+    # Read DASHBOARD tasks assigned to this agent
+    try:
+        from ..dao.dashboard_dao import DashboardDAO
+        dd = DashboardDAO(project_path)
+        dash_tasks = dd.get_tasks_for_agent(agent_id, window_id)
+    except Exception:
+        return
+
+    if not dash_tasks:
+        return
+
+    tasks: list = []
+
+    # Head: claim + report_to_group
+    pending_titles = ", ".join(t.title for t in dash_tasks if t.status == "pending")
+    tasks.append(Task(
+        subject="📢 认领并汇报任务",
+        description=(
+            f"📢 向群聊汇报：调用 report_to_group 告知你已经认领了以下任务并开始工作："
+            f"{pending_titles or '任务'}。"
+            f"同时调用 update_dashboard 将任务状态更新为 in_progress。"
+        ),
+        state="pending",
+        metadata={"type": "report", "action": "claim"},
+    ))
+
+    # Middle: DASHBOARD tasks
+    for dt in dash_tasks:
+        tasks.append(Task(
+            subject=dt.title,
+            description=dt.description or f"执行任务: {dt.title}",
+            state="pending" if dt.status != "done" else "completed",
+            metadata={"dashboard_id": dt.id},
+        ))
+
+    # Tail: completion report
+    tasks.append(Task(
+        subject="📢 完成汇报",
+        description=(
+            "📢 所有任务完成后，调用 report_to_group 向群聊发送完整的成果汇报。"
+            "然后调用 update_dashboard 将已完成的任务标记为 done。"
+        ),
+        state="pending",
+        metadata={"type": "report", "action": "complete"},
+    ))
+
+    # Merge with existing TaskContext to preserve completed states
+    existing = session_record.state.tasks_context
+    if existing and existing.tasks:
+        old_map = {t.subject: t for t in existing.tasks}
+        for t in tasks:
+            old = old_map.get(t.subject)
+            if old and old.state == "completed":
+                t.state = "completed"
+
+    session_record.state.tasks_context = TaskContext(tasks=tasks)

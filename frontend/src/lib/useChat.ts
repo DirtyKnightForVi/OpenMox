@@ -51,7 +51,7 @@ export function useChat() {
       }
 
       const projectPath = useAppStore.getState().currentProjectPath || ".";
-      const url = `/api/sessions/${encodeURIComponent(sessionId)}/stream?agent_id=${encodeURIComponent(agentId)}&project_path=${encodeURIComponent(projectPath)}`;
+      const url = `http://localhost:8000/api/sessions/${encodeURIComponent(sessionId)}/stream?agent_id=${encodeURIComponent(agentId)}&project_path=${encodeURIComponent(projectPath)}`;
       console.log(`[SSE] connecting ${agentId}: ${url}`);
       const es = new EventSource(url);
       sseRefs.current.set(agentId, es);
@@ -155,41 +155,44 @@ export function useChat() {
         return;
       }
 
-      // TOOL_CALL → agent work detail + task progress
-      if (etype === "TOOL_CALL_END") {
-        const toolName = data.name || "tool";
-        addToolCallToAgent(agentId, {
-          name: toolName,
-          _timestamp: data._timestamp || Date.now(),
-        });
-        updateWorkDetail(agentId, { currentTask: `🔧 ${toolName}` });
+      // TOOL_CALL_START → capture tool name
+      if (etype === "TOOL_CALL_START") {
+        const toolName = data.tool_call_name || "tool";
         addTaskProgress({
           worker_session_id: "", worker_agent_id: agentId,
           worker_agent_name: "", reply_id: "",
           event_type: etype, event_seq: 0, timestamp: Date.now(),
           tool_name: toolName,
-          tool_input: data.input,
         });
         return;
       }
 
-      // TOOL_RESULT → agent work detail + task progress
+      // TOOL_CALL_END — update agent status only (no name in this event)
+      if (etype === "TOOL_CALL_END") {
+        addToolCallToAgent(agentId, {
+          name: "tool",
+          _timestamp: data._timestamp || Date.now(),
+        });
+        updateWorkDetail(agentId, { currentTask: `🔧 tool` });
+        return;
+      }
+
+      // TOOL_RESULT — result status only (name was in TOOL_CALL_START)
       if (etype === "TOOL_RESULT_END") {
         const state = data.state;
         addToolCallToAgent(agentId, {
-          name: data.name || "tool",
+          name: "tool",
           state: state,
           _timestamp: data._timestamp || Date.now(),
         });
         const stateLabel = state === "success" ? "✅" : "❌";
         updateWorkDetail(agentId, {
-          currentTask: `${stateLabel} ${data.name || "tool"}`,
+          currentTask: `${stateLabel} tool`,
         });
         addTaskProgress({
           worker_session_id: "", worker_agent_id: agentId,
           worker_agent_name: "", reply_id: "",
           event_type: etype, event_seq: 0, timestamp: Date.now(),
-          tool_name: data.name || "tool",
           tool_state: state,
           tool_output: data.output,
         });

@@ -36,6 +36,7 @@ from agentscope.event import (
     ThinkingBlockStartEvent,
     ThinkingBlockDeltaEvent,
     ThinkingBlockEndEvent,
+    ToolCallStartEvent,
     ToolCallEndEvent,
     ToolResultStartEvent,
     ToolResultEndEvent,
@@ -74,6 +75,7 @@ class TaskPanelProjector:
         ThinkingBlockStartEvent,
         ThinkingBlockDeltaEvent,
         ThinkingBlockEndEvent,
+        ToolCallStartEvent,
         ToolCallEndEvent,
         ToolResultStartEvent,
         ToolResultEndEvent,
@@ -161,9 +163,12 @@ class TaskPanelProjector:
             payload["thinking_started"] = True
         elif isinstance(event, ThinkingBlockEndEvent):
             payload["thinking_ended"] = True
+        elif isinstance(event, ToolCallStartEvent):
+            payload["tool_name"] = event.tool_call_name
         elif isinstance(event, ToolCallEndEvent):
-            payload["tool_name"] = getattr(event, "name", "?")
-            payload["tool_input"] = getattr(event, "input", None)
+            # ToolCallEndEvent has no 'name' — tool name comes from
+            # ToolCallStartEvent which always fires first.
+            pass
         elif isinstance(event, ToolResultEndEvent):
             payload["tool_state"] = getattr(event, "state", "")
             payload["tool_output"] = getattr(event, "output", "")
