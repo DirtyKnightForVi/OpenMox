@@ -29,6 +29,10 @@ if not AGENTSCOPE_SRC.exists():
 
 sys.path.insert(0, str(AGENTSCOPE_SRC))
 
+# ── Load .env before setting defaults ──────────────────
+from dotenv import load_dotenv
+load_dotenv(BACKEND_DIR / ".env")
+
 # ── Default environment variables ──────────────────────
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-xxxxxxxxxx")
 os.environ.setdefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")

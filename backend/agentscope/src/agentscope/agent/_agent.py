@@ -2,7 +2,6 @@
 """The unified agent class in AgentScope library."""
 import asyncio
 import inspect
-import uuid
 
 from asyncio import Queue
 from copy import deepcopy
@@ -21,7 +20,7 @@ from ._config import ContextConfig, ReActConfig, ModelConfig
 from ..state import AgentState
 from ._utils import _ToolCallBatch
 from .._logging import logger
-from .._utils._common import _json_loads_with_repair
+from .._utils._common import _generate_id, _json_loads_with_repair
 from ..event import (
     AgentEvent,
     ModelCallEndEvent,
@@ -71,6 +70,7 @@ from ..message import (
     ToolCallState,
     ToolResultState,
     Usage,
+    HintBlock,
 )
 from ..tool import (
     Toolkit,
@@ -104,9 +104,9 @@ class Agent:
         state: AgentState | None = None,
         offloader: Offloader | None = None,
         # The agent configurations
-        model_config: ModelConfig = ModelConfig(),
-        context_config: ContextConfig = ContextConfig(),
-        react_config: ReActConfig = ReActConfig(),
+        model_config: ModelConfig | None = None,
+        context_config: ContextConfig | None = None,
+        react_config: ReActConfig | None = None,
     ) -> None:
         """Initialize the agent class in AgentScope.
 
@@ -121,23 +121,23 @@ class Agent:
             toolkit (`Toolkit | None`, optional):
                 The toolkit used for registering tools, MCPs and skills as the
                 sole source.
-            middlewares (`list[MiddlewareBase] | None`):
+            middlewares (`list[MiddlewareBase] | None`, optional):
                 Middlewares applied to the agent to modify its behavior
                 without altering its source code. Supported hook points
                 include: reply, reasoning, acting, model call, and system
                 prompt retrieval.
-            state (`AgentState`):
+            state (`AgentState | None`, optional):
                 The agent state. A new state will be created if not provided.
             offloader (`Offloader | None`, optional):
                 The context offloader. If provided, the compressed context and
                 tool result will be offloaded.
-            model_config (`ModelConfig`):
+            model_config (`ModelConfig | None`, optional):
                 The additional chat model configuration including fallback
                 model and retries.
-            context_config (`CompressionConfig`):
+            context_config (`ContextConfig | None`, optional):
                 The context config for context compression and tool result
                 compression.
-            react_config (`ReActConfig`):
+            react_config (`ReActConfig | None`, optional):
                 The config for the reasoning-acting loop.
         """
         self.name = name
@@ -145,9 +145,9 @@ class Agent:
         self.model = model
         self.state = state or AgentState()
 
-        self.model_config = model_config
-        self.context_config = context_config
-        self.react_config = react_config
+        self.model_config = model_config or ModelConfig()
+        self.context_config = context_config or ContextConfig()
+        self.react_config = react_config or ReActConfig()
 
         # The permission engine
         self._engine = PermissionEngine(self.state.permission_context)
@@ -259,6 +259,7 @@ class Agent:
     async def compress_context(
         self,
         context_config: ContextConfig | None = None,
+        instructions: HintBlock | None = None,
     ) -> None:
         """Compress the agent's context if the token count exceeds the
         threshold.
@@ -268,26 +269,40 @@ class Agent:
                 If provided, compress the context with the given context
                 config. Otherwise, use the default context config in the
                 agent.
+            instructions (`HintBlock | None`, optional):
+                Optional hints or instructions injected into the compression
+                context to guide the summarization behavior.
         """
         if not self._compress_context_middlewares:
-            await self._compress_context_impl(context_config=context_config)
+            await self._compress_context_impl(
+                context_config=context_config,
+                instructions=instructions,
+            )
         else:
 
             async def execute_chain(
                 index: int = 0,
                 context_config: ContextConfig | None = context_config,
+                instructions: HintBlock | None = instructions,
             ) -> None:
                 """Execute the compress_context middleware chain."""
                 if index >= len(self._compress_context_middlewares):
                     await self._compress_context_impl(
                         context_config=context_config,
+                        instructions=instructions,
                     )
                 else:
                     mw = self._compress_context_middlewares[index]
-                    input_kwargs = {"context_config": context_config}
+                    input_kwargs = {
+                        "context_config": context_config,
+                        "instructions": instructions,
+                    }
 
                     async def next_handler(**kwargs: Any) -> None:
-                        await execute_chain(index + 1, **kwargs)
+                        await execute_chain(
+                            index + 1,
+                            **{**input_kwargs, **kwargs},
+                        )
 
                     await mw.on_compress_context(
                         agent=self,
@@ -300,6 +315,7 @@ class Agent:
     async def _compress_context_impl(
         self,
         context_config: ContextConfig | None = None,
+        instructions: HintBlock | None = None,
     ) -> None:
         """Compress the agent's context if the token count exceeds the
         threshold.
@@ -309,6 +325,9 @@ class Agent:
                 If provided, compress the context with the given context
                 config. Otherwise, use the default context config in the
                 agent.
+            instructions (`HintBlock | None`, optional):
+                Optional hints or instructions injected into the compression
+                context to guide the summarization behavior.
         """
         cfg: ContextConfig = context_config or self.context_config
 
@@ -383,9 +402,19 @@ class Agent:
         if self.state.summary:
             msgs_system.append(UserMsg("user", self.state.summary))
 
+        instruction_msgs: list[Msg] = []
+        if instructions is not None:
+            instruction_msgs.append(
+                AssistantMsg(
+                    name=self.name,
+                    content=[instructions],
+                ),
+            )
+
         messages = (
             msgs_system
             + msgs_to_compress
+            + instruction_msgs
             + [
                 UserMsg(name="user", content=cfg.compression_prompt),
             ]
@@ -437,6 +466,7 @@ class Agent:
                     messages = (
                         msgs_system
                         + msgs_to_compress[i:]
+                        + instruction_msgs
                         + [
                             UserMsg(
                                 name="user",
@@ -526,7 +556,10 @@ class Agent:
                     async def next_handler(
                         **kwargs: Any,
                     ) -> AsyncGenerator[AgentEvent | Msg, None]:
-                        async for item in execute_chain(index + 1, **kwargs):
+                        async for item in execute_chain(
+                            index + 1,
+                            **{**input_kwargs, **kwargs},
+                        ):
                             yield item
 
                     async for item in mw.on_reply(
@@ -579,7 +612,7 @@ class Agent:
         else:
             await self._handle_incoming_messages(msgs)
             # Update the context with the incoming message and state
-            self.state.reply_id = uuid.uuid4().hex
+            self.state.reply_id = _generate_id()
             self.state.cur_iter = 0
 
             yield ReplyStartEvent(
@@ -739,7 +772,10 @@ class Agent:
                     input_kwargs = {"tool_choice": tool_choice}
 
                     async def next_handler(**kwargs: Any) -> AsyncGenerator:
-                        async for item in execute_chain(index + 1, **kwargs):
+                        async for item in execute_chain(
+                            index + 1,
+                            **{**input_kwargs, **kwargs},
+                        ):
                             yield item
 
                     async for item in mw.on_reasoning(
@@ -790,7 +826,12 @@ class Agent:
             **kwargs,
         )
 
-        block_ids: dict = {"text": None, "thinking": None, "tools": []}
+        block_ids: dict = {
+            "text": None,
+            "thinking": None,
+            "tools": [],
+            "data": [],
+        }
         completed_response: ChatResponse | None = None
 
         # Check if res is an async generator (streaming response)
@@ -831,6 +872,20 @@ class Agent:
             yield ToolCallEndEvent(
                 reply_id=self.state.reply_id,
                 tool_call_id=tool_call_id,
+            )
+        for data_block_id in block_ids["data"]:
+            yield DataBlockEndEvent(
+                reply_id=self.state.reply_id,
+                block_id=data_block_id,
+            )
+
+        # Guard against empty or interrupted streaming responses.
+        if completed_response is None:
+            raise RuntimeError(
+                "Model returned an empty streaming response: no is_last=True"
+                " chunk was received.  The model call may have been "
+                "interrupted mid-stream (network dropout, timeout, or model "
+                "bug).",
             )
 
         # Send the model call ended event with usage if available
@@ -1048,6 +1103,7 @@ class Agent:
                     reply_id=self.state.reply_id,
                     tool_call_id=tool_result.id,
                     state=tool_result.state,
+                    metadata=tool_result.metadata,
                 )
 
                 self._save_to_context([tool_result])
@@ -1271,7 +1327,7 @@ class Agent:
         """Execute a single tool call and forward every event into *queue*.
 
         Args:
-            tool_call (`ToolBlockCall`):
+            tool_call (`ToolCallBlock`):
                 The tool call to execute.
             queue (`Queue`):
                 The shared async queue that collects events from all
@@ -1447,6 +1503,7 @@ class Agent:
                         if isinstance(chunk.content, str)
                         else chunk.content,
                         state=chunk.state,
+                        metadata=chunk.metadata,
                     )
 
                     # ========================================================
@@ -1515,6 +1572,7 @@ class Agent:
                         reply_id=self.state.reply_id,
                         tool_call_id=tool_call.id,
                         state=chunk.state,
+                        metadata=chunk.metadata,
                     )
 
                 else:
@@ -1569,7 +1627,10 @@ class Agent:
                     input_kwargs = {"tool_call": tool_call}
 
                     async def next_handler(**kwargs: Any) -> AsyncGenerator:
-                        async for item in execute_chain(index + 1, **kwargs):
+                        async for item in execute_chain(
+                            index + 1,
+                            **{**input_kwargs, **kwargs},
+                        ):
                             yield item
 
                     async for item in mw.on_acting(
@@ -1633,7 +1694,7 @@ class Agent:
             message (`str`):
                 The error message to be returned for the tool call.
             state (`ToolResultState`):
-                The state of the tool result, which can be "error", "denied",
+                The state of the tool result, such as "error" or "denied".
 
         Yields:
             `ToolResultStartEvent \
@@ -2105,7 +2166,7 @@ class Agent:
                                     # pylint: disable=cell-var-from-loop
                                     return await execute_chain(
                                         index + 1,
-                                        **kwargs,
+                                        **{**input_kwargs, **kwargs},
                                     )
 
                                 return await mw.on_model_call(
@@ -2197,12 +2258,29 @@ class Agent:
             else None
         )
 
+        # Assistant-produced audio (e.g. qwen-omni speaking aloud) is delivered
+        # to the user via streaming events; the raw bytes don't belong in
+        # conversation memory. Filtering here keeps every downstream walker
+        # (formatter, count_tokens, persistence) honest without each having
+        # to remember.
+        persisted_blocks = [
+            b
+            for b in blocks
+            if not (
+                isinstance(b, DataBlock)
+                and isinstance(b.source, (Base64Source, URLSource))
+                and b.source.media_type.startswith("audio/")
+            )
+        ]
+        if not persisted_blocks and msg_usage is None:
+            return
+
         if len(self.state.context) == 0:
             self.state.context.append(
                 AssistantMsg(
                     id=self.state.reply_id,
                     name=self.name,
-                    content=list(blocks),
+                    content=persisted_blocks,
                     usage=msg_usage,
                 ),
             )
@@ -2211,7 +2289,7 @@ class Agent:
             if last_msg.role == "assistant" and last_msg.name == self.name:
                 if isinstance(last_msg.content, str):
                     last_msg.content = [TextBlock(text=last_msg.content)]
-                last_msg.content.extend(blocks)
+                last_msg.content.extend(persisted_blocks)
                 if msg_usage is not None:
                     if last_msg.usage is None:
                         last_msg.usage = msg_usage
@@ -2223,7 +2301,7 @@ class Agent:
                     AssistantMsg(
                         id=self.state.reply_id,
                         name=self.name,
-                        content=list(blocks),
+                        content=persisted_blocks,
                         usage=msg_usage,
                     ),
                 )
@@ -2384,6 +2462,7 @@ class Agent:
 
         # Classify the content blocks into different types
         text_blocks, thinking_blocks, tool_call_blocks = [], [], []
+        data_blocks: list = []
         for block in chunk.content:
             if isinstance(block, TextBlock):
                 text_blocks.append(block)
@@ -2391,36 +2470,18 @@ class Agent:
                 thinking_blocks.append(block)
             elif isinstance(block, ToolCallBlock):
                 tool_call_blocks.append(block)
+            elif isinstance(block, DataBlock):
+                data_blocks.append(block)
 
-        # Handle the text blocks
-        if text_blocks:
-            # If the current chunk has text blocks but no text block id,
-            # start with a start event
-            if not block_ids.get("text"):
-                block_ids["text"] = uuid.uuid4().hex
-                yield TextBlockStartEvent(
-                    reply_id=self.state.reply_id,
-                    block_id=block_ids["text"],
-                )
-            # Go on using the existing text block id to generate delta events
-            yield TextBlockDeltaEvent(
-                reply_id=self.state.reply_id,
-                block_id=block_ids["text"],
-                delta="".join([_.text for _ in text_blocks]),
-            )
-
-        elif block_ids.get("text"):
-            yield TextBlockEndEvent(
-                reply_id=self.state.reply_id,
-                block_id=block_ids["text"],
-            )
-            block_ids["text"] = None
-
-        # Handle the thinking blocks
+        # Handle the thinking stream: continue/open or close.
+        # We only auto-close when the chunk also carries no data blocks;
+        # a data-only chunk (e.g. an omni-style audio PCM delta) must keep
+        # both text and thinking streams alive so the frontend doesn't
+        # fragment one logical stream into many separate bubbles.
         if thinking_blocks:
             # Generate a new thinking block id and start event
             if not block_ids.get("thinking"):
-                block_ids["thinking"] = uuid.uuid4().hex
+                block_ids["thinking"] = _generate_id()
                 yield ThinkingBlockStartEvent(
                     reply_id=self.state.reply_id,
                     block_id=block_ids["thinking"],
@@ -2432,12 +2493,34 @@ class Agent:
                 delta="".join([_.thinking for _ in thinking_blocks]),
             )
 
-        elif block_ids.get("thinking"):
+        elif block_ids.get("thinking") and not data_blocks:
             yield ThinkingBlockEndEvent(
                 reply_id=self.state.reply_id,
                 block_id=block_ids["thinking"],
             )
             block_ids["thinking"] = None
+
+        # Handle the text stream: continue/open or close.  Placed after
+        # thinking so that a chunk carrying both ThinkingBlock and TextBlock
+        # emits thinking events first.
+        if text_blocks:
+            if not block_ids.get("text"):
+                block_ids["text"] = _generate_id()
+                yield TextBlockStartEvent(
+                    reply_id=self.state.reply_id,
+                    block_id=block_ids["text"],
+                )
+            yield TextBlockDeltaEvent(
+                reply_id=self.state.reply_id,
+                block_id=block_ids["text"],
+                delta="".join([_.text for _ in text_blocks]),
+            )
+        elif block_ids.get("text") and not data_blocks:
+            yield TextBlockEndEvent(
+                reply_id=self.state.reply_id,
+                block_id=block_ids["text"],
+            )
+            block_ids["text"] = None
 
         # Handle the tool calls that exist in the current chunk
         for tool_call in tool_call_blocks:
@@ -2466,6 +2549,29 @@ class Agent:
                 tool_call_id=finished_id,
             )
             block_ids["tools"].remove(finished_id)
+
+        # Handle the data blocks (streaming binary content, e.g. omni audio).
+        # Each DataBlock chunk from the model carries a delta payload with a
+        # stable block id; we open a stream the first time we see an id and
+        # emit delta events for subsequent chunks with the same id.
+        for data_block in data_blocks:
+            if not isinstance(data_block.source, Base64Source):
+                # Only Base64Source carries inline delta bytes; URLSource is
+                # one-shot and not part of the streaming protocol.
+                continue
+            if data_block.id not in block_ids["data"]:
+                block_ids["data"].append(data_block.id)
+                yield DataBlockStartEvent(
+                    reply_id=self.state.reply_id,
+                    block_id=data_block.id,
+                    media_type=data_block.source.media_type,
+                )
+            yield DataBlockDeltaEvent(
+                reply_id=self.state.reply_id,
+                block_id=data_block.id,
+                data=data_block.source.data,
+                media_type=data_block.source.media_type,
+            )
 
     async def _convert_tool_chunk_to_event(
         self,

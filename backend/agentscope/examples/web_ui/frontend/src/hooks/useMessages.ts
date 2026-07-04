@@ -2,6 +2,9 @@ import { EventType } from '@agentscope-ai/agentscope/event';
 import type {
 	AgentEvent,
 	CustomEvent,
+	DataBlockStartEvent,
+	DataBlockDeltaEvent,
+	DataBlockEndEvent,
 	ReplyStartEvent,
 	UserConfirmResultEvent,
 } from '@agentscope-ai/agentscope/event';
@@ -12,6 +15,28 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 
 import { sessionApi } from '@/api';
 import { chatApi } from '@/api';
+import { useAudioManager } from '@/context/AudioContext';
+
+/**
+ * One pending subagent HITL request, projected from a team *member*
+ * session onto its *leader* session so the leader UI can render and
+ * resolve it. Mirrors the Python payload written by
+ * ``SubagentHitlProjector`` and pushed/replayed as a ``CustomEvent``
+ * (``name="subagent_require_user_confirm"``).
+ */
+export type SubagentHitlEntry = {
+	worker_session_id: string;
+	worker_agent_id: string;
+	worker_agent_name: string;
+	reply_id: string;
+	event_type: 'require_user_confirm' | 'require_external_execution';
+	/** The original ``RequireUserConfirmEvent`` payload (serialized). */
+	event: { tool_calls?: ToolCallBlock[] } & Record<string, unknown>;
+	created_at: string;
+};
+
+const hitlKey = (e: { worker_session_id: string; reply_id: string }) =>
+	`${e.worker_session_id}:${e.reply_id}`;
 
 /**
  * Manages messages for a single ``(agentId, sessionId)`` pair.
@@ -64,25 +89,20 @@ export function useMessages(
 	const [loading, setLoading] = useState(false);
 	const [streaming, setStreaming] = useState(false);
 	const [error, setError] = useState<Error | null>(null);
+	// Pending subagent HITL cards projected onto this (leader) session.
+	const [subagentHitl, setSubagentHitl] = useState<SubagentHitlEntry[]>([]);
 
 	const msgsRef = useRef<Msg[]>([]);
 	const currentReplyRef = useRef<Msg | null>(null);
 	const abortRef = useRef<AbortController | null>(null);
 	const rafRef = useRef<number | null>(null);
 
-	// Mirror `options` into a ref so `processEvent` (a single-creation
-	// useCallback to keep the SSE stable) always reads the freshest
-	// callbacks. Without this, the closure freezes the first render's
-	// `options` — typically captured when `agentId` is still `null` —
-	// so `team_updated` / `state_updated` events fire stale no-op
-	// handlers, which in turn call `useSessions(null).refetch`
-	// (`if (!agentId) setSessions([])`) and blank out the session list.
+	const audioManager = useAudioManager();
+
 	const optionsRef = useRef(options);
 	useEffect(() => {
 		optionsRef.current = options;
 	}, [options]);
-
-	/** Batch UI updates via requestAnimationFrame. */
 	const scheduleUpdate = useCallback(() => {
 		if (rafRef.current !== null) return;
 		rafRef.current = requestAnimationFrame(() => {
@@ -102,10 +122,24 @@ export function useMessages(
 					optionsRef.current?.onTeamUpdated?.();
 				} else if (custom.name === 'state_updated' && custom.value) {
 					optionsRef.current?.onStateUpdated?.(custom.value as Record<string, unknown>);
+				} else if (custom.name === 'subagent_require_user_confirm') {
+					// A team member is asking for confirmation; show (or
+					// refresh) its card on this leader view. Dedup by
+					// (worker_session_id, reply_id).
+					const e = custom.value as unknown as SubagentHitlEntry;
+					setSubagentHitl((prev) => [
+						...prev.filter((x) => hitlKey(x) !== hitlKey(e)),
+						e,
+					]);
+				} else if (custom.name === 'subagent_user_confirm_result') {
+					// The member resolved (or its run ended); clear the card.
+					const v = custom.value as { worker_session_id: string; reply_id: string };
+					setSubagentHitl((prev) => prev.filter((x) => hitlKey(x) !== hitlKey(v)));
 				}
 				return;
 			}
 			if (event.type === EventType.REPLY_START) {
+				audioManager?.stopAllPlayback();
 				const e = event as ReplyStartEvent;
 				const msg = AssistantMsg({ id: e.reply_id, name: e.name, content: [] });
 				msgsRef.current = [...msgsRef.current, msg];
@@ -120,9 +154,33 @@ export function useMessages(
 			} else if (currentReplyRef.current) {
 				appendEvent(currentReplyRef.current, event);
 			}
+
+			// Route streaming audio DataBlocks to the audio manager. They still
+			// flow through `appendEvent` above (which builds up `source.data`
+			// in the Msg), but MessageBubble reads playback state from the
+			// manager so it can show progress and autoplay on completion.
+			if (audioManager) {
+				if (event.type === EventType.DATA_BLOCK_START) {
+					const e = event as DataBlockStartEvent;
+					if (e.media_type.startsWith('audio/')) {
+						audioManager.start(e.block_id, e.media_type);
+					}
+				} else if (event.type === EventType.DATA_BLOCK_DELTA) {
+					const e = event as DataBlockDeltaEvent;
+					if (e.media_type.startsWith('audio/')) {
+						audioManager.append(e.block_id, e.data);
+					}
+				} else if (event.type === EventType.DATA_BLOCK_END) {
+					const e = event as DataBlockEndEvent;
+					// `end` is a no-op when the block isn't being tracked, so
+					// we can call it unconditionally.
+					audioManager.end(e.block_id);
+				}
+			}
+
 			scheduleUpdate();
 		},
-		[scheduleUpdate],
+		[scheduleUpdate, audioManager],
 	);
 
 	// ── Lifecycle: fetch history + open SSE stream ──────────────────
@@ -132,6 +190,8 @@ export function useMessages(
 		setMsgs([]);
 		setError(null);
 		setStreaming(false);
+		setSubagentHitl([]);
+		audioManager?.disposeAll();
 
 		if (!agentId || !sessionId) return;
 
@@ -176,7 +236,7 @@ export function useMessages(
 			controller.abort();
 			abortRef.current = null;
 		};
-	}, [agentId, sessionId, scheduleUpdate, processEvent]);
+	}, [agentId, sessionId, scheduleUpdate, processEvent, audioManager]);
 
 	/**
 	 * Send a user message. Appends the message to the local list
@@ -257,5 +317,68 @@ export function useMessages(
 		abortRef.current?.abort();
 	}, []);
 
-	return { msgs, loading, streaming, error, send, onUserConfirm, abort };
+	/**
+	 * Confirm or deny a tool call that a *team member* is awaiting,
+	 * from this leader view (design §3.6 — backend routing).
+	 *
+	 * The result is POSTed to the **leader** session (the
+	 * ``(agentId, sessionId)`` this hook is bound to), NOT the worker.
+	 * The backend resolves ``reply_id`` → worker session via the
+	 * leader's pending hash and forwards the event to the worker's
+	 * continuation. The client never addresses the worker directly —
+	 * ``entry.worker_*`` ids are used only for local dedup / clearing.
+	 *
+	 * @param entry - The pending subagent HITL entry being resolved.
+	 * @param toolCall - The tool call block to confirm/deny.
+	 * @param confirm - Whether the user confirmed.
+	 * @param rules - Optional permission rules to attach.
+	 */
+	const onSubagentConfirm = useCallback(
+		async (
+			entry: SubagentHitlEntry,
+			toolCall: ToolCallBlock,
+			confirm: boolean,
+			rules?: ToolCallBlock['suggested_rules'],
+		) => {
+			if (!agentId || !sessionId) return;
+
+			const event: UserConfirmResultEvent = {
+				type: EventType.USER_CONFIRM_RESULT,
+				id: crypto.randomUUID(),
+				created_at: new Date().toISOString(),
+				reply_id: entry.reply_id, // worker's reply_id; backend maps it
+				confirm_results: [
+					{ confirmed: confirm, tool_call: toolCall, rules: rules ?? null },
+				],
+			};
+
+			// Optimistically clear; the backend's clear event re-confirms.
+			setSubagentHitl((prev) => prev.filter((x) => hitlKey(x) !== hitlKey(entry)));
+
+			try {
+				// Post to the leader front door — backend routes to the
+				// worker session (§3.6). Do NOT address the worker here.
+				await chatApi.trigger({
+					agent_id: agentId,
+					session_id: sessionId,
+					input: event,
+				});
+			} catch (e) {
+				setError(e as Error);
+			}
+		},
+		[agentId, sessionId],
+	);
+
+	return {
+		msgs,
+		loading,
+		streaming,
+		error,
+		send,
+		onUserConfirm,
+		onSubagentConfirm,
+		subagentHitl,
+		abort,
+	};
 }

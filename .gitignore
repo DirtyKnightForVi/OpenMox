@@ -12,6 +12,8 @@ frontend/.next/
 
 logs/
 
+docs/
+
 .env
 
 .codegraph/

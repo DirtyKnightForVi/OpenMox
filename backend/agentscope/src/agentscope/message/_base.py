@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """The message class in agentscope."""
-import uuid
+import base64
 from datetime import datetime
 from typing import Literal, List, overload, Sequence, Self, TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from .._utils._common import _generate_id
 from ._block import (
     TextBlock,
     ThinkingBlock,
@@ -72,7 +73,7 @@ class Msg(BaseModel):
     """The message content as a list of content blocks."""
     role: Literal["user", "assistant", "system"]
     """The role of the sender."""
-    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    id: str = Field(default_factory=_generate_id)
     """The message identifier."""
     metadata: dict = Field(default_factory=dict)
     """The metadata of the message"""
@@ -283,7 +284,18 @@ class Msg(BaseModel):
                         event.block_id,
                     )
                 elif event.data:
-                    block.source.data += event.data
+                    # Each delta is an independently base64-encoded chunk
+                    # (with its own padding); naive string concat would
+                    # corrupt the byte stream. Decode, concat bytes, re-encode.
+                    existing = (
+                        base64.b64decode(block.source.data)
+                        if block.source.data
+                        else b""
+                    )
+                    incoming = base64.b64decode(event.data)
+                    block.source.data = base64.b64encode(
+                        existing + incoming,
+                    ).decode("ascii")
 
             case EventType.DATA_BLOCK_END:
                 pass
@@ -404,6 +416,7 @@ class Msg(BaseModel):
                 else:
                     assert isinstance(block, ToolResultBlock)
                     block.state = event.state
+                    block.metadata = event.metadata
                 # The paired ToolCallBlock's lifecycle ends with its
                 # result — flip it to FINISHED here so the SSE-rebuilt
                 # reply_msg matches ``agent.state.context``, which
@@ -492,7 +505,7 @@ def UserMsg(
         metadata=metadata or {},
         created_at=created_at,
         finished_at=finished_at,
-        id=id or uuid.uuid4().hex,
+        id=id or _generate_id(),
     )
 
 
@@ -540,7 +553,7 @@ def AssistantMsg(
         metadata=metadata or {},
         created_at=created_at or datetime.now().isoformat(),
         finished_at=finished_at,
-        id=id or uuid.uuid4().hex,
+        id=id or _generate_id(),
         usage=usage,
     )
 
@@ -589,5 +602,5 @@ def SystemMsg(
         metadata=metadata or {},
         created_at=created_at,
         finished_at=finished_at,
-        id=id or uuid.uuid4().hex,
+        id=id or _generate_id(),
     )

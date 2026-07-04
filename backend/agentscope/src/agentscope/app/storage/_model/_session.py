@@ -32,6 +32,84 @@ class ChatModelConfig(BaseModel):
     """The model parameters."""
 
 
+class TTSModelConfig(BaseModel):
+    """The TTS model configuration class."""
+
+    type: str
+    """The provider type."""
+
+    credential_id: str
+    """The credential id."""
+
+    model: str
+    """The TTS model name."""
+
+    parameters: dict
+    """TTS parameters (voice, language, etc.)."""
+
+
+class EmbeddingModelConfig(BaseModel):
+    """Configuration for constructing an embedding model from a credential.
+
+    Mirrors :class:`ChatModelConfig` but targets
+    :class:`~agentscope.embedding.EmbeddingModelBase` subclasses.
+    Used by :class:`KnowledgeBaseRecord` to persist the user's
+    embedding model selection.
+    """
+
+    type: str
+    """The provider type (e.g. ``"openai_credential"``)."""
+
+    credential_id: str
+    """The credential id to use for authentication."""
+
+    model: str
+    """The embedding model name (e.g. ``"text-embedding-3-small"``)."""
+
+    dimensions: int = Field(..., gt=0)
+    """The output embedding vector dimensions.
+
+    Required and first-class — chosen at config-creation time and
+    pinned to the resulting :class:`KnowledgeBaseRecord` so subsequent
+    indexing / retrieval calls are dim-deterministic without any
+    fallback lookup.
+    """
+
+    parameters: dict = Field(default_factory=dict)
+    """The provider-specific non-dimensional parameters.
+
+    Does **not** carry ``dimensions`` — that field is promoted to a
+    top-level attribute above.
+    """
+
+
+class SessionKnowledgeConfig(BaseModel):
+    """Session-level knowledge base attachment.
+
+    Persists which knowledge bases the agent should retrieve from for
+    this session and how the
+    :class:`~agentscope.middleware.RAGMiddleware` should be
+    configured.  ``parameters`` carries the user-tunable middleware
+    fields verbatim (mirrors :attr:`ChatModelConfig.parameters`); the
+    accepted keys and value types are described by
+    :meth:`RAGMiddleware.Config.model_json_schema`.
+    """
+
+    knowledge_base_ids: list[str] = Field(default_factory=list)
+    """Ids of the knowledge bases attached to this session.
+
+    Empty list means no knowledge base is wired and the middleware is
+    not installed.
+    """
+
+    parameters: dict = Field(default_factory=dict)
+    """Middleware parameters keyed by ``RAGMiddleware``'s
+    :class:`Config` model fields (``mode``, ``top_k``,
+    ``score_threshold``, ``emit_hint_event``, ``persist_hint``,
+    ``hint_template``).
+    """
+
+
 class SessionConfig(BaseModel):
     """Session configuration — set at creation, updatable via PATCH."""
 
@@ -50,6 +128,14 @@ class SessionConfig(BaseModel):
     fallback_chat_model_config: ChatModelConfig | None = None
     """The fallback chat model config. Used as a backup when the primary
     model fails. None means no fallback configured."""
+
+    tts_model_config: TTSModelConfig | None = None
+    """The TTS model config. None means TTS is not enabled."""
+
+    knowledge_config: SessionKnowledgeConfig | None = None
+    """Knowledge bases attached to this session and the corresponding
+    :class:`~agentscope.middleware.RAGMiddleware` parameters.
+    ``None`` means no knowledge base is wired."""
 
 
 class SessionRecord(_RecordBase):

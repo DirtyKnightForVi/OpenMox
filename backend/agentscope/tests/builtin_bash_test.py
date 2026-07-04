@@ -1,18 +1,22 @@
 # -*- coding: utf-8 -*-
 """Bash tool test case."""
+
+import os
 import sys
 import unittest
 from unittest.async_case import IsolatedAsyncioTestCase
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from agentscope.tool import ToolChunk, Bash
-from agentscope.tool._builtin._bash import _subprocess_creation_kwargs
+from agentscope.message import TextBlock
 from agentscope.permission import (
-    PermissionContext,
     PermissionBehavior,
+    PermissionContext,
     PermissionRule,
 )
-from agentscope.message import TextBlock
+from agentscope.tool import Bash, ToolChunk
+from agentscope.tool._builtin._backend import (
+    _subprocess_creation_kwargs,
+)
 
 
 class BashSubprocessKwargsTest(unittest.TestCase):
@@ -20,16 +24,54 @@ class BashSubprocessKwargsTest(unittest.TestCase):
 
     def test_non_windows_subprocess_kwargs_are_empty(self) -> None:
         """On non-Windows the helper returns no extra subprocess kwargs."""
-        with patch("agentscope.tool._builtin._bash.os.name", "posix"):
+        with patch(
+            "agentscope.tool._builtin._backend.os.name",
+            "posix",
+        ):
             self.assertEqual(_subprocess_creation_kwargs(), {})
 
     def test_windows_subprocess_kwargs_hide_console(self) -> None:
         """On Windows the helper sets ``creationflags`` to hide the console."""
-        with patch("agentscope.tool._builtin._bash.os.name", "nt"):
+        with patch("agentscope.tool._builtin._backend.os.name", "nt"):
             self.assertEqual(
                 _subprocess_creation_kwargs(),
                 {"creationflags": 0x08000000},
             )
+
+
+class BashCwdTest(IsolatedAsyncioTestCase):
+    """Test Bash working-directory wiring."""
+
+    async def test_cwd_is_passed_to_subprocess(self) -> None:
+        """The constructor-level cwd should be used for each command."""
+        process = MagicMock()
+        process.returncode = 0
+        process.communicate = AsyncMock(return_value=(b"ok\n", b""))
+
+        create_process = AsyncMock(return_value=process)
+        with patch(
+            "agentscope.tool._builtin._backend."
+            "asyncio.create_subprocess_exec",
+            create_process,
+        ):
+            chunks = []
+            async for chunk in await Bash(cwd="workspace")(command="pwd"):
+                chunks.append(chunk)
+
+        # cwd is forwarded, and the command line is wrapped in the
+        # platform's native shell (the backend primitive runs an argv
+        # without a shell): ``cmd /c`` on Windows, ``/bin/sh -c`` else.
+        self.assertEqual(create_process.call_args.kwargs["cwd"], "workspace")
+        expected_argv = (
+            ("cmd", "/c", "pwd")
+            if os.name == "nt"
+            else ("/bin/sh", "-c", "pwd")
+        )
+        self.assertEqual(
+            create_process.call_args.args,
+            expected_argv,
+        )
+        self.assertEqual(chunks[0].state, "running")
 
 
 @unittest.skipIf(
@@ -64,7 +106,7 @@ class BashToolTest(IsolatedAsyncioTestCase):
     async def test_simple_command(self) -> None:
         """Test executing a simple bash command."""
         chunks = []
-        async for chunk in self.bash_tool(command="echo 'Hello World'"):
+        async for chunk in await self.bash_tool(command="echo 'Hello World'"):
             chunks.append(chunk)
 
         self.assertEqual(len(chunks), 1)
@@ -78,7 +120,7 @@ class BashToolTest(IsolatedAsyncioTestCase):
     async def test_command_with_error(self) -> None:
         """Test executing a command that fails."""
         chunks = []
-        async for chunk in self.bash_tool(command="exit 1"):
+        async for chunk in await self.bash_tool(command="exit 1"):
             chunks.append(chunk)
 
         self.assertEqual(len(chunks), 1)
@@ -92,7 +134,7 @@ class BashToolTest(IsolatedAsyncioTestCase):
     async def test_command_timeout(self) -> None:
         """Test command timeout."""
         chunks = []
-        async for chunk in self.bash_tool(
+        async for chunk in await self.bash_tool(
             command="sleep 10",
             timeout=100,  # 100ms timeout
         ):
@@ -219,7 +261,7 @@ class BashToolMatchRuleTest(IsolatedAsyncioTestCase):
         """Test match_rule with prefix patterns (e.g., git:*)."""
         # Test exact command match
         self.assertTrue(
-            self.bash_tool.match_rule(
+            await self.bash_tool.match_rule(
                 "git:*",
                 {"command": "git"},
             ),
@@ -227,7 +269,7 @@ class BashToolMatchRuleTest(IsolatedAsyncioTestCase):
 
         # Test command with arguments
         self.assertTrue(
-            self.bash_tool.match_rule(
+            await self.bash_tool.match_rule(
                 "git:*",
                 {"command": "git status"},
             ),
@@ -235,7 +277,7 @@ class BashToolMatchRuleTest(IsolatedAsyncioTestCase):
 
         # Test non-matching command
         self.assertFalse(
-            self.bash_tool.match_rule(
+            await self.bash_tool.match_rule(
                 "git:*",
                 {"command": "npm install"},
             ),
@@ -245,7 +287,7 @@ class BashToolMatchRuleTest(IsolatedAsyncioTestCase):
         """Test match_rule with wildcard patterns."""
         # Test wildcard matching
         self.assertTrue(
-            self.bash_tool.match_rule(
+            await self.bash_tool.match_rule(
                 "git * -m *",
                 {"command": "git commit -m 'test'"},
             ),
@@ -253,7 +295,7 @@ class BashToolMatchRuleTest(IsolatedAsyncioTestCase):
 
         # Test non-matching wildcard
         self.assertFalse(
-            self.bash_tool.match_rule(
+            await self.bash_tool.match_rule(
                 "git * -m *",
                 {"command": "git status"},
             ),
@@ -263,7 +305,7 @@ class BashToolMatchRuleTest(IsolatedAsyncioTestCase):
         """Test match_rule with substring patterns."""
         # Test substring matching
         self.assertTrue(
-            self.bash_tool.match_rule(
+            await self.bash_tool.match_rule(
                 "install",
                 {"command": "npm install package"},
             ),
@@ -271,7 +313,7 @@ class BashToolMatchRuleTest(IsolatedAsyncioTestCase):
 
         # Test non-matching substring
         self.assertFalse(
-            self.bash_tool.match_rule(
+            await self.bash_tool.match_rule(
                 "install",
                 {"command": "npm run build"},
             ),
@@ -281,7 +323,7 @@ class BashToolMatchRuleTest(IsolatedAsyncioTestCase):
         """Test match_rule with escaped characters."""
         # Test escaped asterisk
         self.assertTrue(
-            self.bash_tool.match_rule(
+            await self.bash_tool.match_rule(
                 r"echo \*",
                 {"command": "echo *"},
             ),
@@ -289,7 +331,7 @@ class BashToolMatchRuleTest(IsolatedAsyncioTestCase):
 
         # Test escaped backslash
         self.assertTrue(
-            self.bash_tool.match_rule(
+            await self.bash_tool.match_rule(
                 r"echo \\",
                 {"command": "echo \\"},
             ),
@@ -299,7 +341,7 @@ class BashToolMatchRuleTest(IsolatedAsyncioTestCase):
         """Test generate_suggestions for bash commands."""
 
         # Test two-word command
-        suggestions = self.bash_tool.generate_suggestions(
+        suggestions = await self.bash_tool.generate_suggestions(
             {"command": "git commit -m 'test'"},
         )
 
@@ -313,7 +355,7 @@ class BashToolMatchRuleTest(IsolatedAsyncioTestCase):
 
     async def test_generate_suggestions_single_word(self) -> None:
         """Test generate_suggestions for single-word commands."""
-        suggestions = self.bash_tool.generate_suggestions(
+        suggestions = await self.bash_tool.generate_suggestions(
             {"command": "npm install"},
         )
 

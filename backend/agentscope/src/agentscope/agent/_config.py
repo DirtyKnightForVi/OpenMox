@@ -10,14 +10,12 @@ class SummarySchema(BaseModel):
     """The compressed memory model, used to generate summary of old memories"""
 
     task_overview: str = Field(
-        max_length=300,
         description=(
             "The user's core request and success criteria.\n"
             "Any clarifications or constraints they specified"
         ),
     )
     current_state: str = Field(
-        max_length=300,
         description=(
             "What has been completed so far.\n"
             "File created, modified, or analyzed (with paths if relevant).\n"
@@ -25,7 +23,6 @@ class SummarySchema(BaseModel):
         ),
     )
     important_discoveries: str = Field(
-        max_length=300,
         description=(
             "Technical constraints or requirements uncovered.\n"
             "Decisions made and their rationale.\n"
@@ -34,7 +31,6 @@ class SummarySchema(BaseModel):
         ),
     )
     next_steps: str = Field(
-        max_length=200,
         description=(
             "Specific actions needed to complete the task.\n"
             "Any blockers or open questions to resolve.\n"
@@ -42,15 +38,14 @@ class SummarySchema(BaseModel):
         ),
     )
     context_to_preserve: str = Field(
-        max_length=300,
         description=(
             "User preferences or style requirements.\n"
             "Domain-specific details that aren't obvious.\n"
             "Any promises made to the user"
         ),
     )
-    """Whether to execute multiple tool calls in parallel within one
-    reasoning step."""
+    """The important context to preserve across compression, e.g. user
+    preferences, domain-specific details and promises made to the user."""
 
 
 class ContextConfig(BaseModel):
@@ -106,7 +101,7 @@ class ContextConfig(BaseModel):
     )
     """The string template to present the compressed summary to the agent,
     which will be formatted with the fields from the
-    `compression_summary_model`."""
+    `summary_schema`."""
 
     summary_schema: dict = Field(
         default_factory=SummarySchema.model_json_schema,
@@ -116,7 +111,7 @@ class ContextConfig(BaseModel):
 
     tool_result_limit: int = Field(
         title="Tool Result Limit",
-        default=3000,
+        default=50000,
         description=(
             "The maximum length of the tool results in tokens. "
             "If exceeded, the tool result will be truncated."

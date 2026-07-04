@@ -3,7 +3,15 @@
 from pydantic import BaseModel, Field
 
 from ....permission import PermissionMode
-from ...storage import AgentRecord, ChatModelConfig, SessionRecord, TeamRecord
+from ...storage import (
+    AgentRecord,
+    ChatModelConfig,
+    SessionKnowledgeConfig,
+    TTSModelConfig,
+    SessionRecord,
+    TeamRecord,
+)
+from ..._service import SessionStatus
 
 
 class TeamMemberView(BaseModel):
@@ -68,6 +76,18 @@ class CreateSessionRequest(BaseModel):
         description="Fallback model used when the primary model fails. "
         "Can be set later via PATCH.",
     )
+    tts_model_config: TTSModelConfig | None = Field(
+        default=None,
+        description="TTS model configuration. Can be set later via PATCH.",
+    )
+    knowledge_config: SessionKnowledgeConfig | None = Field(
+        default=None,
+        description=(
+            "Knowledge bases attached to this session plus the "
+            "`RAGMiddleware` parameters. Can be set later "
+            "via PATCH."
+        ),
+    )
 
 
 class CreateSessionResponse(BaseModel):
@@ -96,6 +116,18 @@ class UpdateSessionRequest(BaseModel):
         default=None,
         description="New fallback model configuration. "
         "Pass null to clear; omit to leave unchanged.",
+    )
+    tts_model_config: TTSModelConfig | None = Field(
+        default=None,
+        description="New TTS model configuration. "
+        "Pass null to clear; omit to leave unchanged.",
+    )
+    knowledge_config: SessionKnowledgeConfig | None = Field(
+        default=None,
+        description=(
+            "New knowledge base attachment + middleware parameters. "
+            "Pass null to clear; omit to leave unchanged."
+        ),
     )
     permission_mode: PermissionMode | None = Field(
         default=None,
@@ -154,4 +186,25 @@ class ListMessagesResponse(BaseModel):
     messages: list = Field(description="Messages in chronological order.")
     is_running: bool = Field(
         description="Whether the session is currently running.",
+    )
+
+
+class SessionStatusResponse(BaseModel):
+    """Response body for probing a session's high-level status.
+
+    See :class:`~agentscope.app._service.SessionStatus` for the
+    semantics of each ``status`` value and the precedence rules used
+    to derive it.
+    """
+
+    session_id: str = Field(description="The session that was probed.")
+    status: SessionStatus = Field(
+        description=(
+            "The session's unified status. One of ``running`` "
+            "(some worker holds the run lease), ``idle`` (no worker, "
+            "context clean), ``awaiting_permission`` (no worker, "
+            "context parked on HITL tool call), or "
+            "``awaiting_external_result`` (no worker, context parked "
+            "on external executor)."
+        ),
     )

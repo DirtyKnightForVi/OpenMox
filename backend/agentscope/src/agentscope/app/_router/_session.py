@@ -2,12 +2,12 @@
 """Session router — create, list, update, delete, stream, and get messages."""
 import asyncio
 import json
-import uuid
 from typing import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 
+from ..._utils._common import _generate_id
 from ..deps import (
     get_current_user_id,
     get_message_bus,
@@ -19,21 +19,27 @@ from ._schema import (
     CreateSessionResponse,
     ListMessagesResponse,
     ListSessionsResponse,
+    SessionStatusResponse,
     SessionView,
     TeamDetailResponse,
     TeamMemberView,
     UpdateSessionRequest,
 )
-from ..message_bus import MessageBus
-from .._service import SessionService
+from ..message_bus import MessageBus, MessageBusKeys
+from .._service import SessionService, SessionProjection, SubagentHitlProjector
 from ..storage import (
     AgentRecord,
     ChatModelConfig,
+    SessionKnowledgeConfig,
+    TTSModelConfig,
     SessionConfig,
     SessionRecord,
     StorageBase,
     TeamRecord,
 )
+from ...message import ToolCallState
+from ..storage._utils import _ensure_team_members
+from ...event import CustomEvent
 
 
 async def _build_team_detail(
@@ -67,13 +73,16 @@ async def _build_team_detail(
         )
 
     members: list[TeamMemberView] = []
-    for member_id in team.data.member_ids:
-        agent = await storage.get_agent(user_id, member_id)
+    for member in await _ensure_team_members(storage, user_id, team):
+        agent = await storage.get_agent(member.owner_id, member.agent_id)
         if agent is None:
             continue
-        sessions = await storage.list_sessions(user_id, member_id)
-        session_id = sessions[0].id if sessions else None
-        members.append(TeamMemberView(agent=agent, session_id=session_id))
+        # Use the member's team-scoped session id directly; an invited
+        # agent has multiple sessions and only ``member.session_id``
+        # belongs to this team.
+        members.append(
+            TeamMemberView(agent=agent, session_id=member.session_id),
+        )
 
     return TeamDetailResponse(
         team=team,
@@ -92,7 +101,7 @@ session_router = APIRouter(
 async def _ensure_credential_exists(
     storage: StorageBase,
     user_id: str,
-    config: ChatModelConfig | None,
+    config: ChatModelConfig | TTSModelConfig | None,
 ) -> None:
     """Validate that the credential referenced by ``config`` belongs to the
     given user. No-op when ``config`` is ``None``.
@@ -100,8 +109,8 @@ async def _ensure_credential_exists(
     Args:
         storage (`StorageBase`): Injected storage backend.
         user_id (`str`): The authenticated user ID.
-        config (`ChatModelConfig | None`): Model config to validate. Pass
-            ``None`` to skip the check.
+        config (`ChatModelConfig | TTSModelConfig | None`): Model config to
+            validate. Pass ``None`` to skip the check.
 
     Raises:
         `HTTPException`: 404 if the credential does not exist or does not
@@ -115,6 +124,37 @@ async def _ensure_credential_exists(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Credential '{config.credential_id}' not found.",
         )
+
+
+async def _ensure_knowledge_bases_exist(
+    storage: StorageBase,
+    user_id: str,
+    config: SessionKnowledgeConfig | None,
+) -> None:
+    """Validate every KB id in ``config`` belongs to the given user.
+
+    No-op when ``config`` is ``None`` or its ``knowledge_base_ids``
+    list is empty.
+
+    Args:
+        storage (`StorageBase`): Injected storage backend.
+        user_id (`str`): The authenticated user ID.
+        config (`SessionKnowledgeConfig | None`):
+            Knowledge config to validate.  Pass ``None`` to skip.
+
+    Raises:
+        `HTTPException`: 404 if any KB id does not exist or is not
+            owned by the user.
+    """
+    if config is None or not config.knowledge_base_ids:
+        return
+    for kb_id in config.knowledge_base_ids:
+        kb = await storage.get_knowledge_base(user_id, kb_id)
+        if kb is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Knowledge base '{kb_id}' not found.",
+            )
 
 
 @session_router.get(
@@ -181,7 +221,9 @@ async def list_sessions(
         views.append(
             SessionView(
                 session=session,
-                is_running=await message_bus.session_is_running(session.id),
+                is_running=await message_bus.is_locked(
+                    MessageBusKeys.session_lock(session.id),
+                ),
                 team=team_detail,
             ),
         )
@@ -230,14 +272,22 @@ async def create_session(
         user_id,
         body.fallback_chat_model_config,
     )
+    await _ensure_credential_exists(storage, user_id, body.tts_model_config)
+    await _ensure_knowledge_bases_exist(
+        storage,
+        user_id,
+        body.knowledge_config,
+    )
 
     session_record = await storage.upsert_session(
         user_id=user_id,
         agent_id=body.agent_id,
         config=SessionConfig(
-            workspace_id=body.workspace_id or uuid.uuid4().hex,
+            workspace_id=body.workspace_id or _generate_id(),
             chat_model_config=body.chat_model_config,
             fallback_chat_model_config=body.fallback_chat_model_config,
+            tts_model_config=body.tts_model_config,
+            knowledge_config=body.knowledge_config,
             **({"name": body.name} if body.name is not None else {}),
         ),
     )
@@ -325,6 +375,12 @@ async def update_session(
         user_id,
         body.fallback_chat_model_config,
     )
+    await _ensure_credential_exists(storage, user_id, body.tts_model_config)
+    await _ensure_knowledge_bases_exist(
+        storage,
+        user_id,
+        body.knowledge_config,
+    )
 
     updated_state = existing.state
     if body.permission_mode is not None:
@@ -350,7 +406,9 @@ async def update_session(
     return await storage.upsert_session(
         user_id=user_id,
         agent_id=agent_id,
-        config=existing.config.model_copy(update=config_updates),
+        config=SessionConfig.model_validate(
+            {**existing.config.model_dump(mode="json"), **config_updates},
+        ),
         state=updated_state,
         session_id=session_id,
     )
@@ -404,7 +462,70 @@ async def list_messages(
     )
     return ListMessagesResponse(
         messages=messages,
-        is_running=await message_bus.session_is_running(session_id),
+        is_running=await message_bus.is_locked(
+            MessageBusKeys.session_lock(session_id),
+        ),
+    )
+
+
+# ----------------------------------------------------------------------
+# Status probe: unified session status (cluster liveness + parking state)
+# ----------------------------------------------------------------------
+
+
+@session_router.get(
+    "/{session_id}/status",
+    response_model=SessionStatusResponse,
+    summary="Probe the session's high-level status",
+)
+async def get_session_status(
+    session_id: str,
+    agent_id: str = Query(description="Agent the session belongs to."),
+    user_id: str = Depends(get_current_user_id),
+    session_service: SessionService = Depends(get_session_service),
+) -> SessionStatusResponse:
+    """Return the unified :class:`SessionStatus` for a session.
+
+    Ownership validation, cluster-liveness probing, and parked-state
+    derivation are all delegated to
+    :meth:`SessionService.get_session_status` — see that method for
+    the precedence rules that collapse the two orthogonal signals
+    (message-bus run lock + persisted context tail) into a single
+    four-valued enum.
+
+    Args:
+        session_id (`str`):
+            The session to probe.
+        agent_id (`str`):
+            The agent that owns the session (ownership validation).
+        user_id (`str`):
+            Injected authenticated user ID.
+        session_service (`SessionService`):
+            Injected session service. Owns both storage and message
+            bus dependencies so the composed answer is derived in a
+            single layer.
+
+    Returns:
+        `SessionStatusResponse`:
+            The probed session id and its unified status.
+
+    Raises:
+        `HTTPException`: 404 if the session does not exist or does not
+            belong to the authenticated user.
+    """
+    session_status = await session_service.get_session_status(
+        user_id,
+        agent_id,
+        session_id,
+    )
+    if session_status is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session '{session_id}' not found.",
+        )
+    return SessionStatusResponse(
+        session_id=session_id,
+        status=session_status,
     )
 
 
@@ -414,6 +535,61 @@ async def list_messages(
 
 _HEARTBEAT_INTERVAL_SECS = 30
 # Interval between SSE heartbeat comment frames (``:\\n\\n``).
+
+
+async def _worker_still_asking(
+    storage: StorageBase,
+    user_id: str,
+    worker_agent_id: str,
+    worker_session_id: str,
+    reply_id: str,
+) -> bool:
+    """Return whether a worker session is still parked on the ASKING
+    tool call identified by ``reply_id``.
+
+    This is the reconcile-on-read check (design §3.5): the worker
+    session's own ``state.context`` is the single source of truth for
+    "does this confirmation still need answering". A leader-side
+    pending projection whose worker has already resolved / cancelled
+    the call is a ghost and must not be replayed.
+
+    Mirrors the wakeup guard in
+    :meth:`ChatService._run_impl` — a request is "still asking" when
+    the tail ``AssistantMsg`` of the worker carries a tool call in
+    ``ASKING`` or ``SUBMITTED`` state for the matching ``reply_id``.
+
+    Args:
+        storage (`StorageBase`):
+            Application storage.
+        user_id (`str`):
+            The owner user id.
+        worker_agent_id (`str`):
+            The worker agent that owns the session.
+        worker_session_id (`str`):
+            The worker session to inspect.
+        reply_id (`str`):
+            The reply id the pending request belongs to.
+
+    Returns:
+        `bool`:
+            ``True`` if the worker is still awaiting confirmation for
+            ``reply_id``; ``False`` otherwise (resolved, cancelled, or
+            the session/record is gone).
+    """
+    session = await storage.get_session(
+        user_id,
+        worker_agent_id,
+        worker_session_id,
+    )
+    if session is None or not session.state.context:
+        return False
+    last_msg = session.state.context[-1]
+    if last_msg.role != "assistant" or last_msg.id != reply_id:
+        return False
+    return any(
+        tc.state in (ToolCallState.ASKING, ToolCallState.SUBMITTED)
+        for tc in last_msg.get_content_blocks("tool_call")
+    )
 
 
 @session_router.get(
@@ -466,10 +642,47 @@ async def stream_session_events(
 
     async def _sse_generator() -> AsyncGenerator[str, None]:
         # 1. Replay buffered events from the current run (if any).
-        for _entry_id, event in await message_bus.session_read_events(
-            session_id,
+        for _entry_id, event in await message_bus.log_read(
+            MessageBusKeys.session_events(session_id),
+            max_count=MessageBusKeys.SESSION_REPLAY_MAX_LEN,
         ):
             yield f"data: {json.dumps(event)}\n\n"
+
+        # 1b. Inject pending subagent HITL cards projected onto this
+        #     session as a team leader (design §3.5). These live in a
+        #     durable Redis hash — NOT in the replay log (trimmed per
+        #     run) nor in the leader's own Msg history — so a fresh
+        #     reconnect after the worker parked still surfaces them.
+        #
+        #     Reconcile-on-read: the worker session's own context is the
+        #     SSOT. Inject only when the worker is still ASKING; drop and
+        #     delete ghosts (worker resolved/cancelled without clearing).
+        projection = SessionProjection(message_bus)
+        for payload in await projection.list(
+            session_id,
+            SubagentHitlProjector.KIND,
+        ):
+            if not await _worker_still_asking(
+                storage,
+                user_id,
+                payload["worker_agent_id"],
+                payload["worker_session_id"],
+                payload["reply_id"],
+            ):
+                await projection.delete(
+                    session_id,
+                    SubagentHitlProjector.KIND,
+                    SubagentHitlProjector.entry_id(
+                        payload["worker_session_id"],
+                        payload["reply_id"],
+                    ),
+                )
+                continue
+            custom = CustomEvent(
+                name=SubagentHitlProjector.EVT_REQUIRE,
+                value=payload,
+            )
+            yield f"data: {json.dumps(custom.model_dump(mode='json'))}\n\n"
 
         # 2. Live subscribe via a background feeder task that pushes
         #    events into a queue. The main loop reads from the queue
@@ -488,10 +701,12 @@ async def stream_session_events(
             (which in practice only happens if the bus shuts down).
             """
             try:
-                async for evt in message_bus.session_subscribe_events(
-                    session_id,
+                async for evt in message_bus.subscribe(
+                    MessageBusKeys.session_events(session_id),
                 ):
-                    await queue.put(evt)
+                    await queue.put(
+                        {k: v for k, v in evt.items() if k != "_entry_id"},
+                    )
             except asyncio.CancelledError:
                 pass
             finally:

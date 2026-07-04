@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """The Google Gemini chat model implementation."""
 import base64
-import copy
 import json
-import uuid
 from datetime import datetime
 from typing import Literal, Any, AsyncGenerator, TYPE_CHECKING, List, Type
 
 from pydantic import BaseModel, Field
 
+from ..._utils._common import _generate_id, _flatten_json_schema
 from .._base import ChatModelBase, _TOOL_CHOICE_LITERAL_MODES
 from .._model_response import ChatResponse
 from .._model_usage import ChatUsage
@@ -16,7 +15,6 @@ from ...credential import GeminiCredential
 from ...formatter import FormatterBase, GeminiChatFormatter
 from ...message import Msg, ThinkingBlock, ToolCallBlock, TextBlock
 from ...tool import ToolChoice
-from ..._logging import logger
 
 if TYPE_CHECKING:
     from google.genai.types import GenerateContentResponse
@@ -24,56 +22,76 @@ else:
     GenerateContentResponse = Any
 
 
-def _flatten_json_schema(schema: dict) -> dict:
-    """Flatten a JSON schema by resolving all $ref references.
+def _sanitize_schema_for_gemini(schema: Any) -> Any:
+    """Sanitize a JSON schema to be compatible with the Gemini API.
 
-    Gemini API does not support ``$defs`` and ``$ref`` in JSON schemas.
+    Gemini API does not support certain JSON Schema constructs. This
+    function removes or rewrites the following:
+
+    - ``additionalProperties``: removed entirely.
+    - ``anyOf`` containing a ``{"type": "null"}`` entry: simplified to
+      the single non-null type. If there is exactly one non-null
+      alternative it is inlined directly; otherwise the ``anyOf`` is
+      kept but the null entry is dropped.
+    - All nested sub-schemas (``properties``, ``items``, ``$defs``,
+      etc.) are processed recursively.
 
     Args:
-        schema (`dict`):
-            The JSON schema that may contain ``$defs`` and ``$ref`` references.
+        schema (`Any`):
+            The JSON schema to sanitize. Non-dict values are returned
+            unchanged; lists are recursively sanitized element-wise.
 
     Returns:
-        `dict`:
-            A flattened JSON schema with all references resolved inline.
+        `Any`:
+            A sanitized copy of the schema, or the original value if it
+            is not a dict or list.
     """
-    schema = copy.deepcopy(schema)
-    defs = schema.pop("$defs", {})
+    if not isinstance(schema, dict):
+        if isinstance(schema, list):
+            return [_sanitize_schema_for_gemini(v) for v in schema]
+        return schema
 
-    def _resolve_ref(obj: Any, visited: set | None = None) -> Any:
-        if visited is None:
-            visited = set()
-        if not isinstance(obj, dict):
-            if isinstance(obj, list):
-                return [_resolve_ref(item, visited.copy()) for item in obj]
-            return obj
-        if "$ref" in obj:
-            ref_path = obj["$ref"]
-            if ref_path.startswith("#/$defs/"):
-                def_name = ref_path[len("#/$defs/") :]
-                if def_name in visited:
-                    logger.warning(
-                        "Circular reference detected for '%s' in tool schema",
-                        def_name,
-                    )
-                    return {
-                        "type": "object",
-                        "description": f"(circular: {def_name})",
-                    }
-                visited.add(def_name)
-                if def_name in defs:
-                    resolved = _resolve_ref(defs[def_name], visited.copy())
-                    for key, value in obj.items():
-                        if key != "$ref":
-                            resolved[key] = _resolve_ref(value, visited.copy())
-                    return resolved
-            return obj
-        result = {}
-        for key, value in obj.items():
-            result[key] = _resolve_ref(value, visited.copy())
-        return result
+    schema = dict(schema)
 
-    return _resolve_ref(schema)
+    # Remove additionalProperties — not supported by Gemini
+    schema.pop("additionalProperties", None)
+
+    # Simplify anyOf that only differs by a null type, e.g. Optional[X]
+    if "anyOf" in schema and isinstance(schema["anyOf"], list):
+        any_of = schema["anyOf"]
+        non_null = [v for v in any_of if v != {"type": "null"}]
+        if len(non_null) < len(any_of):  # at least one null entry removed
+            if len(non_null) == 1:
+                # Inline the single non-null type, preserving outer keys
+                merged = dict(_sanitize_schema_for_gemini(non_null[0]))
+                for k, v in schema.items():
+                    if k != "anyOf":
+                        merged.setdefault(k, v)
+                return merged
+            elif non_null:
+                schema["anyOf"] = [
+                    _sanitize_schema_for_gemini(v) for v in non_null
+                ]
+            else:
+                del schema["anyOf"]
+
+    # Recursively process nested object schemas
+    for key in ["properties", "patternProperties", "$defs"]:
+        if key in schema and isinstance(schema[key], dict):
+            schema[key] = {
+                k: _sanitize_schema_for_gemini(v)
+                for k, v in schema[key].items()
+            }
+
+    for key in ["items", "not", "if", "then", "else"]:
+        if key in schema:
+            schema[key] = _sanitize_schema_for_gemini(schema[key])
+
+    for key in ["allOf", "oneOf", "anyOf"]:
+        if key in schema and isinstance(schema[key], list):
+            schema[key] = [_sanitize_schema_for_gemini(v) for v in schema[key]]
+
+    return schema
 
 
 class GeminiChatModel(ChatModelBase):
@@ -314,7 +332,7 @@ class GeminiChatModel(ChatModelBase):
             # Capture response_id from the first chunk that carries it
             if response_id is None:
                 response_id = (
-                    getattr(chunk, "response_id", None) or uuid.uuid4().hex
+                    getattr(chunk, "response_id", None) or _generate_id()
                 )
 
             delta_content: list = []
@@ -347,7 +365,7 @@ class GeminiChatModel(ChatModelBase):
                                 part.thought_signature,
                             ).decode("utf-8")
                         else:
-                            call_id = part.function_call.id
+                            call_id = part.function_call.id or _generate_id()
                         input_str = json.dumps(
                             keyword_args,
                             ensure_ascii=False,
@@ -385,7 +403,7 @@ class GeminiChatModel(ChatModelBase):
             )
 
         yield ChatResponse(
-            id=response_id or uuid.uuid4().hex,
+            id=response_id or _generate_id(),
             content=final_content,
             is_last=True,
             usage=usage,
@@ -431,7 +449,7 @@ class GeminiChatModel(ChatModelBase):
                             part.thought_signature,
                         ).decode("utf-8")
                     else:
-                        call_id = part.function_call.id
+                        call_id = part.function_call.id or _generate_id()
                     content_blocks.append(
                         ToolCallBlock(
                             id=call_id,
@@ -443,7 +461,7 @@ class GeminiChatModel(ChatModelBase):
         usage = self._extract_usage(response.usage_metadata, start_datetime)
 
         return ChatResponse(
-            id=getattr(response, "response_id", None) or uuid.uuid4().hex,
+            id=getattr(response, "response_id", None) or _generate_id(),
             content=content_blocks,
             is_last=True,
             usage=usage,
@@ -524,8 +542,8 @@ class GeminiChatModel(ChatModelBase):
                     continue
                 func = schema["function"].copy()
                 if "parameters" in func:
-                    func["parameters"] = _flatten_json_schema(
-                        func["parameters"],
+                    func["parameters"] = _sanitize_schema_for_gemini(
+                        _flatten_json_schema(func["parameters"]),
                     )
                 function_declarations.append(func)
             fmt_tools = [{"function_declarations": function_declarations}]
