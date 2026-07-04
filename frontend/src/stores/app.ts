@@ -9,6 +9,7 @@ import type {
   WorkDetail,
   ToolCallEvent,
   WindowTab,
+  TaskProgressEvent,
 } from "@/lib/types";
 
 interface AppState {
@@ -36,6 +37,9 @@ interface AppState {
   agentWorkDetail: Record<string, WorkDetail>;
   wsConnected: boolean;
 
+  // ── Task panel progress ──
+  taskProgress: Record<string, TaskProgressEvent[]>;
+
   // ── Window / Topic tabs ──
   windowTabs: WindowTab[];
   activeWindowId: string;
@@ -60,6 +64,7 @@ interface AppState {
   updateWorkDetail: (agentId: string, update: Partial<WorkDetail>) => void;
   addToolCallToAgent: (agentId: string, event: ToolCallEvent) => void;
   addThinkingToAgent: (agentId: string, delta: string) => void;
+  addTaskProgress: (event: TaskProgressEvent) => void;
   setWsConnected: (v: boolean) => void;
 
   // ── Window / Topic actions ──
@@ -81,6 +86,7 @@ export const useAppStore = create<AppState>((set) => ({
   agentStatus: {},
   agentWorkDetail: {},
   wsConnected: false,
+  taskProgress: {},
   windowTabs: [],
   activeWindowId: '',
   currentProjectPath: '',
@@ -122,7 +128,7 @@ export const useAppStore = create<AppState>((set) => ({
   setMemories: (memories) => set({ memories }),
   backToProjects: () =>
     set({ currentProject: null, currentWindowId: null, messages: [], tasks: [], memories: [],
-      agentStatus: {}, agentWorkDetail: {}, windowTabs: [] }),
+      agentStatus: {}, agentWorkDetail: {}, windowTabs: [], taskProgress: {} }),
 
   // ── Agent status actions ──
   setAgentStatus: (agentId, status) =>
@@ -157,6 +163,16 @@ export const useAppStore = create<AppState>((set) => ({
         },
       },
     })),
+  addTaskProgress: (event) =>
+    set((s) => {
+      const key = event.worker_agent_id;
+      const existing = s.taskProgress[key] || [];
+      // Cap at 200 events per worker to avoid memory bloat
+      const trimmed = existing.length >= 200 ? existing.slice(-150) : existing;
+      return {
+        taskProgress: { ...s.taskProgress, [key]: [...trimmed, event] },
+      };
+    }),
   setWsConnected: (v) => set({ wsConnected: v }),
 
   // ── Window / Topic actions ──

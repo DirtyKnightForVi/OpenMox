@@ -4,7 +4,9 @@ built-in tools that conflict with our design:
 
 Removed from leader toolkit:
   - AgentCreate   — creates ephemeral Redis workers; our design uses
-                    agent_from_template (persistent YAML agents)
+                    YAML templates + SubAgentTemplate mapping
+  - AgentInvite   — invites existing agents to teams; our design manages
+                    team membership via .Project/team.yaml
   - TeamCreate    — AgentScope's team management; our design manages
                     teams per-project via .Project/team.yaml
   - TaskCreate / TaskList / TaskGet / TaskUpdate
@@ -15,6 +17,8 @@ Removed from leader toolkit:
 Kept:
   - TeamSay       — inter-agent communication (core to our design)
   - TeamDelete    — safe to keep (won't be used without TeamCreate)
+  - Schedule*     — retained; agentscope cron scheduling (non-conflicting)
+  - ToolStop      — retained; offloaded tool cancellation
 """
 
 from __future__ import annotations
@@ -27,7 +31,12 @@ from agentscope.app._service._toolkit import get_toolkit
 if TYPE_CHECKING:
     from agentscope.app.storage import StorageBase
     from agentscope.app.message_bus import MessageBus
-    from agentscope.app._types import AgentToolFactory, AgentMiddlewareFactory
+    from agentscope.app._types import (
+        AgentToolFactory,
+        AgentMiddlewareFactory,
+        EventProjector,
+        SubAgentTemplate,
+    )
     from agentscope.app._manager import (
         SchedulerManager,
         BackgroundTaskManager,
@@ -39,12 +48,11 @@ if TYPE_CHECKING:
 # Tools that AgentScope injects automatically but we DON'T want.
 # These conflict with our YAML-based agent management and dashboard system.
 _UNWANTED_TOOLS: set[str] = {
-    "AgentCreate",      # ephemeral Redis worker → use agent_from_template
+    "AgentCreate",      # ephemeral Redis worker → use YAML templates
+    "AgentInvite",      # invite agents to team → use .Project/team.yaml
     "TeamCreate",       # AgentScope team → use .Project/team.yaml
-    "TaskCreate",       # built-in planning → use create_task_plan
-    "TaskList",         # built-in planning → use get_dashboard
-    "TaskGet",          # built-in planning
-    "TaskUpdate",       # built-in planning → use update_dashboard
+    # TaskCreate/TaskList/TaskGet/TaskUpdate are KEPT — workers use them
+    # for the plan-execute loop (TaskContext auto-injected by _run_one).
 }
 
 
@@ -61,6 +69,8 @@ class OpenMoxChatService(ChatService):
         message_bus: "MessageBus",
         extra_agent_tools: "AgentToolFactory | None" = None,
         extra_agent_middlewares: "AgentMiddlewareFactory | None" = None,
+        extra_projectors: "list[EventProjector] | None" = None,
+        custom_subagent_templates: "dict[str, SubAgentTemplate] | None" = None,
     ) -> None:
         super().__init__(
             storage=storage,
@@ -70,6 +80,8 @@ class OpenMoxChatService(ChatService):
             message_bus=message_bus,
             extra_agent_tools=extra_agent_tools,
             extra_agent_middlewares=extra_agent_middlewares,
+            extra_projectors=extra_projectors,
+            custom_subagent_templates=custom_subagent_templates,
         )
 
     async def _run_impl(

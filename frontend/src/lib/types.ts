@@ -114,3 +114,25 @@ export interface WindowTab {
   label: string;
   projectName: string;
 }
+
+// ── Task panel progress events (from TaskPanelProjector) ──
+
+export interface TaskProgressEvent {
+  worker_session_id: string;
+  worker_agent_id: string;
+  worker_agent_name: string;
+  reply_id: string;
+  event_type: string;       // e.g. "ThinkingBlockDeltaEvent", "ToolCallEndEvent"
+  event_seq: number;
+  timestamp: number;
+  // Event-specific fields (only one set per event):
+  delta?: string;           // ThinkingBlockDelta
+  thinking_started?: boolean;
+  thinking_ended?: boolean;
+  tool_name?: string;       // ToolCallEnd
+  tool_input?: unknown;
+  tool_state?: string;      // ToolResultEnd
+  tool_output?: string;
+  tool_result_started?: boolean;
+  summary?: string;         // TextBlockEnd
+}

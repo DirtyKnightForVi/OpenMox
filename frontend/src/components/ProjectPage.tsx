@@ -18,6 +18,7 @@ export default function ProjectPage() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const {
+    projects,
     currentProject,
     messages,
     isStreaming,
@@ -40,11 +41,11 @@ export default function ProjectPage() {
   const projectPath = useMemo(() => {
     if (currentProject?.full_path) return currentProject.full_path;
     // Try to find by name from the stored projects list
-    const found = useAppStore.getState().projects.find(
+    const found = projects.find(
       (p: { name: string }) => p.name === projectName
     );
     return found?.full_path || ".";
-  }, [currentProject, projectName]);
+  }, [currentProject, projectName, projects]);
 
   // Sync resolved projectPath to the store so useChat can use it
   useEffect(() => {
@@ -85,7 +86,7 @@ export default function ProjectPage() {
   }, [windowId]);
 
   // Ensure we have the projects list on page load (e.g., direct URL navigation)
-  const { projects, setProjects } = useAppStore();
+  const { setProjects } = useAppStore();
   useEffect(() => {
     if (projects.length === 0) {
       import("@/lib/api").then(({ listProjects }) =>

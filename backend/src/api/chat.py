@@ -75,6 +75,28 @@ async def handle_ws(ws: WebSocket) -> None:
     mention_router = MentionRouter()
     _registered_window: str | None = None
     _project_path: str = "."
+    _window_sub_task: asyncio.Task | None = None
+
+    async def _subscribe_window_stream(window_id: str):
+        """Persistently forward window stream events to the WebSocket.
+
+        Skips ``human_message`` — those are sent directly in
+        _handle_command to avoid the Pub/Sub subscription race.
+        """
+        from main import app as _app
+        _bus = getattr(_app.state, "message_bus", None)
+        if _bus is None:
+            return
+        key = _window_key(window_id)
+        try:
+            async for payload in _bus.subscribe(key):
+                if payload.get("type") == "human_message":
+                    continue  # already sent directly
+                await _safe_send(ws, payload)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.debug("Window stream subscription ended for %s", window_id[:20])
 
     try:
         while True:
@@ -120,6 +142,12 @@ async def handle_ws(ws: WebSocket) -> None:
                         "WS registered: window=%s project=%s",
                         window_id[:30], _project_path,
                     )
+                    # Start persistent window stream subscription.
+                    # This delivers human_message, agent_report (from
+                    # report_to_group tool), and task_progress events.
+                    _window_sub_task = asyncio.create_task(
+                        _subscribe_window_stream(window_id),
+                    )
 
                 await _handle_command(
                     ws, msg, mention_router, window_id, _project_path,
@@ -141,6 +169,12 @@ async def handle_ws(ws: WebSocket) -> None:
     except Exception as e:
         log.error("WebSocket error: %s", e)
     finally:
+        if _window_sub_task is not None:
+            _window_sub_task.cancel()
+            try:
+                await _window_sub_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if _registered_window is not None:
             await ws_unregister(_registered_window)
             log.info("WS unregistered: window=%s", _registered_window[:30])
@@ -159,6 +193,7 @@ def _resolve_project_from_agents(agent_ids: list[str]) -> str:
     if none found.
     """
     if not agent_ids:
+        log.info("_resolve_project: no agent ids to resolve, returning '.'")
         return "."
     import sqlite3
     from ..dao import ConfigDAO
@@ -169,14 +204,30 @@ def _resolve_project_from_agents(agent_ids: list[str]) -> str:
             "SELECT name, full_path FROM projects ORDER BY created_at DESC",
         ).fetchall()
         db.close()
+        log.info(
+            "_resolve_project: scanning %d projects for agents=%s",
+            len(rows), agent_ids,
+        )
         for row in rows:
             proj_path = row["full_path"]
             dao = ConfigDAO(proj_path)
             existing = {a.id for a in dao.list_agents()}
+            log.info(
+                "_resolve_project: project=%s agents=%s",
+                proj_path[-30:], sorted(existing),
+            )
             if existing & set(agent_ids):
+                log.info(
+                    "_resolve_project: MATCH project=%s for agents=%s",
+                    proj_path, agent_ids,
+                )
                 return proj_path
-    except Exception:
-        pass
+        log.warning(
+            "_resolve_project: no project matched agents=%s",
+            agent_ids,
+        )
+    except Exception as e:
+        log.warning("_resolve_project: error scanning projects: %s", e)
     return "."
 
 
@@ -309,7 +360,8 @@ async def _handle_command(
             await message_bus.publish(key, human_event)
         except Exception:
             pass  # best-effort
-        # Also push directly to WebSocket for immediate UI feedback
+        # Push directly for immediate UI feedback (window stream
+        # subscription may not be ready yet — Pub/Sub race).
         await _safe_send(ws, human_event)
 
         # Persist to SQLite messages (audit)
@@ -406,6 +458,20 @@ async def _handle_command(
             source=SessionSource.USER,
         )
 
+        # ── Seed TaskContext from DASHBOARD (plan-execute model) ──
+        # Workers get a TaskContext with auto-injected head (claim
+        # + report_to_group) and tail (completion report_to_group).
+        # The middle tasks come from DASHBOARD.yaml.
+        _seeded_tasks = await _seed_task_context(
+            storage=storage,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            project_path=project_path,
+            window_id=window_id,
+            clean_msg=clean_msg,
+        )
+
         # Build input message
         from agentscope.message import Msg
         try:
@@ -421,58 +487,26 @@ async def _handle_command(
                 role="user",
             )
 
-        # ── Run agent via ChatService, collect events → WS ──
-        sub_ready = asyncio.Event()
-        text_parts: list[str] = []
-
-        # Extract agent_id from session_id for event tagging.
-        # Session format: "{window_id}:{agent_id}"
-        _current_agent = session_id.rsplit(":", 1)[-1] if ":" in session_id else ""
-
-        async def _collect():
-            event_count = 0
-            async for payload in message_bus.session_subscribe_events(
-                session_id, on_ready=sub_ready.set,
-            ):
-                event_count += 1
-                etype = payload.get("type", "?")
-                # Inject _agent_id so frontend / tests can group events by agent
-                if _current_agent and "_agent_id" not in payload:
-                    payload["_agent_id"] = _current_agent
-                # Forward every event to WebSocket directly
-                await _safe_send(ws, payload)
-                if etype == "TEXT_BLOCK_DELTA":
-                    text_parts.append(payload.get("delta", ""))
-                elif etype == "REPLY_END":
-                    log.info(
-                        "_collect: agent=%s REPLY_END after %d events, text_len=%d",
-                        _current_agent, event_count, len("".join(text_parts)),
-                    )
-                    return
-            log.warning(
-                "_collect: agent=%s stream ended without REPLY_END, events=%d",
-                _current_agent, event_count,
-            )
-
-        collector_task = asyncio.create_task(_collect())
-        await asyncio.wait_for(sub_ready.wait(), timeout=5.0)
-        await asyncio.sleep(0)  # let collector enter async-for
+        # ── Run agent via ChatService ──
+        # Agent events (THINKING, TOOL_CALL, TOOL_RESULT, TEXT)
+        # are streamed via the SSE endpoint /api/sessions/{sid}/stream
+        # — no collector, no sub_ready, no drain window needed here.
+        # The frontend connects to SSE directly per agent.
+        #
+        # Group-chat messages come from the agent's report_to_group tool,
+        # which publishes to the window stream as complete Markdown.
+        # Chain-trigger (@mentions) are detected from window stream
+        # messages, not from session events.
 
         # ── Push agent:busy to WebSocket ─────────
+        # Includes session_id so the frontend can open an SSE
+        # connection for this agent's task-panel events.
         await _safe_send(ws, {
             "type": "agent:busy",
             "_agent_id": agent_id,
+            "session_id": session_id,
             "_timestamp": time.time(),
         })
-
-        # Debug: check session team_id before running
-        try:
-            sess = await storage.get_session(user_id, agent_id, session_id)
-            _tid = sess.team_id if sess else None
-            log.info("_run_one: session team_id=%s session=%s",
-                     (_tid[:12] if _tid else 'None'), session_id[:30])
-        except Exception:
-            pass
 
         _t0 = time.time()
         log.info("_run_one: entering chat_service.run() session=%s", session_id[:30])
@@ -497,22 +531,28 @@ async def _handle_command(
         log.info("_run_one: chat_service.run() returned after %.1fs session=%s error=%s",
                  _elapsed, session_id[:30], _chat_error or "none")
 
-        # Don't wait for collector — cancel it.  AgentScope's stream may
-        # end without REPLY_END when the ReAct loop pauses for external
-        # input, hits max_iters, or a tool raises.  Instead of hanging
-        # the frontend on three dots, we push agent:idle immediately.
-        collector_task.cancel()
-        try:
-            await collector_task
-        except asyncio.CancelledError:
-            pass
-
         # ── Push agent:idle to WebSocket ──────────
         await _safe_send(ws, {
             "type": "agent:idle",
             "_agent_id": agent_id,
             "_timestamp": time.time(),
         })
+
+        # ── Clear stale agent context unconditionally ──
+        # AgentScope's WakeupDispatcher skips sessions with parked
+        # tool calls.  Clear the context after every run so the next
+        # run (user-initiated or TeamSay wake-up) starts fresh.
+        try:
+            sess = await storage.get_session(user_id, agent_id, session_id)
+            if sess and sess.state:
+                sess.state.context = []
+                sess.state.reply_id = ""
+                sess.state.cur_iter = 0
+                await storage.update_session_state(
+                    user_id, agent_id, session_id, sess.state,
+                )
+        except Exception:
+            pass
 
         # If chat_service crashed, tell the user.
         if _chat_error:
@@ -525,72 +565,46 @@ async def _handle_command(
                 ),
             })
 
-        full_text = "".join(text_parts)
-
-        # ── Force summary: if agent called tools but produced no text,
-        #     give it one more round with a "please summarize" prompt ──
-        if not full_text.strip() and not _chat_error:
-            log.info(
-                "_run_one: agent=%s produced no text, forcing summary",
-                agent_id,
+        # ── Read reply text from storage ──────────
+        # After chat_service.run(), the reply message is persisted
+        # by ChatService._run_impl.  Read it back for chain triggering
+        # and SQLite persistence.
+        full_text = ""
+        try:
+            reply_msg = await storage.get_message(
+                user_id, session_id, agent_id,
             )
+            if reply_msg:
+                text_blocks = [
+                    b.text for b in reply_msg.content
+                    if hasattr(b, "text") and b.text
+                ]
+                full_text = "\n".join(text_blocks)
+        except Exception:
+            pass
+
+        # ── Auto-continue: if TaskContext has pending tasks, re-wake ──
+        if not _chat_error:
             try:
-                from agentscope.message import Msg, TextBlock
-                summary_prompt = Msg(
-                    name="user",
-                    content=[TextBlock(
-                        text="请用文字总结你刚才完成的工作。你做了哪些操作？结果是什么？"
-                    )],
-                    role="user",
-                )
-                # Reset collector for the summary round
-                summary_text: list[str] = []
-                _sub_ready2 = asyncio.Event()
-
-                async def _collect2():
-                    async for payload in message_bus.session_subscribe_events(
-                        session_id, on_ready=_sub_ready2.set,
-                    ):
-                        etype = payload.get("type", "?")
-                        if _current_agent and "_agent_id" not in payload:
-                            payload["_agent_id"] = _current_agent
-                        await _safe_send(ws, payload)
-                        if etype == "TEXT_BLOCK_DELTA":
-                            summary_text.append(payload.get("delta", ""))
-                        elif etype == "REPLY_END":
-                            return
-
-                collector2 = asyncio.create_task(_collect2())
-                await asyncio.wait_for(_sub_ready2.wait(), timeout=5.0)
-                await asyncio.sleep(0)
-
-                await chat_service.run(
-                    user_id=user_id,
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    input_msg=summary_prompt,
-                )
-                collector2.cancel()
-                try:
-                    await collector2
-                except asyncio.CancelledError:
-                    pass
-                full_text = "".join(summary_text) or full_text
-            except Exception as e:
-                log.warning(
-                    "_run_one: summary round failed for %s: %s",
-                    agent_id, e,
-                )
-
-        # ── Guard: if still no text after summary attempt ──
-        if not full_text.strip():
-            await _safe_send(ws, {
-                "type": "system_message",
-                "content": (
-                    f"Agent「{agent_id}」已完成执行但未生成文本回复。"
-                    f"可能是工具调用后未进行总结。请重试。"
-                ),
-            })
+                sess = await storage.get_session(user_id, agent_id, session_id)
+                if sess and sess.state and sess.state.tasks_context:
+                    pending = [
+                        t for t in sess.state.tasks_context.tasks
+                        if t.state == "pending"
+                    ]
+                    if pending:
+                        log.info(
+                            "_run_one: auto-continue worker=%s pending_tasks=%d",
+                            agent_id, len(pending),
+                        )
+                        # Re-enqueue wakeup — WakeupDispatcher will pick it up
+                        await message_bus.enqueue_wakeup(
+                            user_id=user_id,
+                            session_id=session_id,
+                            agent_id=agent_id,
+                        )
+            except Exception:
+                pass
 
         return {"agent_id": agent_id, "text": full_text}
 
@@ -601,52 +615,157 @@ async def _handle_command(
     )
 
     # ── Persist + chain-trigger ─────────────────────
+    # Collect all text to scan for @mentions (agent text + report_to_group)
     for agent_id, result in zip(mentioned, results):
         if isinstance(result, Exception):
             log.error("Agent %s failed: %s", agent_id, result)
             continue
 
         r = result if isinstance(result, dict) else {"agent_id": agent_id, "text": ""}
-        if not r["text"]:
+
+        # Scan both the agent's reply text AND recent agent_report events
+        # from the window stream for @mentions.
+        texts_to_scan = [r["text"]] if r["text"] else []
+
+        # Also check window stream for agent_report events from this agent
+        try:
+            for _eid, evt in await message_bus.log_read(
+                _window_key(window_id), max_count=50,
+            ):
+                if evt.get("type") == "agent_report" and evt.get("_agent_id") == agent_id:
+                    texts_to_scan.append(evt.get("content", ""))
+        except Exception:
+            pass
+
+        if not texts_to_scan:
             continue
 
-        await append_message(
-            window_id, content=r["text"],
-            speaker_type="agent", speaker_id=r["agent_id"],
-        )
-
-        # Check if agent's reply contains @mentions → chain trigger
+        # Chain trigger: scan all texts for @mentions
         if _chain_depth < _MAX_CHAIN_DEPTH:
-            reply_mentioned, _ = mention_router.parse(r["text"])
+            reply_mentioned = set()
+            for text in texts_to_scan:
+                m, _ = mention_router.parse(text)
+                reply_mentioned.update(m)
+            reply_mentioned = list(reply_mentioned)
+            # Build the set of already-invoked agents for the next depth:
+            # original invoked + agents just spawned in this batch.
+            next_invoked = _invoked_agents | frozenset(mentioned)
+            # Skip chain-trigger for agents already in invoked set
+            reply_mentioned = [
+                a for a in reply_mentioned
+                if a not in next_invoked
+            ]
             if reply_mentioned:
-                # Build the set of already-invoked agents for the next depth:
-                # original invoked + agents just spawned in this batch.
-                next_invoked = _invoked_agents | frozenset(mentioned)
-                # Skip chain-trigger for agents already in invoked set
-                reply_mentioned = [
-                    a for a in reply_mentioned
-                    if a not in next_invoked
-                ]
-                if reply_mentioned:
-                    log.info(
-                        "Chain trigger depth=%d: @%s ← %s",
-                        _chain_depth + 1, reply_mentioned, r["agent_id"],
-                    )
-                    chain_msg = {
-                        "type": "pilotdeck-command",
-                        "command": r["text"],
-                        "options": {
-                            "sessionKey": window_id,
-                            "sessionId": window_id,
-                            "projectPath": project_path,
-                            "cwd": project_path,
-                        },
-                    }
-                    await _handle_command(
-                        ws, chain_msg, mention_router,
-                        window_id, project_path, _chain_depth + 1,
-                        _invoked_agents=next_invoked,
-                    )
+                log.info(
+                    "Chain trigger depth=%d: @%s ← %s",
+                    _chain_depth + 1, reply_mentioned, r["agent_id"],
+                )
+                chain_msg = {
+                    "type": "pilotdeck-command",
+                    "command": r["text"],
+                    "options": {
+                        "sessionKey": window_id,
+                        "sessionId": window_id,
+                        "projectPath": project_path,
+                        "cwd": project_path,
+                    },
+                }
+                await _handle_command(
+                    ws, chain_msg, mention_router,
+                    window_id, project_path, _chain_depth + 1,
+                    _invoked_agents=next_invoked,
+                )
+
+
+# ── TaskContext seeding ──────────────────────────────
+
+
+async def _seed_task_context(
+    *,
+    storage,
+    user_id: str,
+    agent_id: str,
+    session_id: str,
+    project_path: str,
+    window_id: str,
+    clean_msg: str,
+) -> int:
+    """Inject a plan-execute TaskContext into the agent's session state.
+
+    Reads tasks from DASHBOARD.yaml assigned to this agent, wraps them
+    with a head task (claim + report_to_group) and a tail task
+    (completion report_to_group), and writes them into the agent's
+    ``AgentState.tasks_context`` in Redis.
+
+    Returns the number of tasks seeded (0 = nothing to do).
+    """
+    from ..dao.dashboard_dao import DashboardDAO
+    from agentscope.state import Task, TaskContext
+
+    dd = DashboardDAO(project_path)
+    dash_tasks = dd.get_tasks_for_agent(agent_id, window_id)
+
+    # Only seed if there are tasks assigned to this agent
+    if not dash_tasks:
+        return 0
+
+    tasks: list[Task] = []
+
+    # ── Head: claim + immediate feedback ──
+    pending_titles = ", ".join(
+        t.title for t in dash_tasks if t.status == "pending"
+    )
+    head_desc = (
+        f"📢 向群聊汇报：调用 report_to_group 告知你已经认领了以下任务并开始工作："
+        f"{pending_titles or '任务'}。"
+        f"同时调用 update_dashboard 将任务状态更新为 in_progress。"
+    )
+    tasks.append(Task(
+        subject="📢 认领并汇报任务",
+        description=head_desc,
+        state="pending",
+        metadata={"type": "report", "action": "claim"},
+    ))
+
+    # ── Middle: DASHBOARD tasks ──
+    for dt in dash_tasks:
+        tasks.append(Task(
+            subject=dt.title,
+            description=dt.description or f"执行任务: {dt.title}",
+            state="pending" if dt.status != "done" else "completed",
+            metadata={"dashboard_id": dt.id},
+        ))
+
+    # ── Tail: completion report ──
+    tail_desc = (
+        "📢 所有任务完成后，调用 report_to_group 向群聊发送完整的成果汇报。"
+        "然后调用 update_dashboard 将已完成的任务标记为 done。"
+    )
+    tasks.append(Task(
+        subject="📢 完成汇报",
+        description=tail_desc,
+        state="pending",
+        metadata={"type": "report", "action": "complete"},
+    ))
+
+    task_context = TaskContext(tasks=tasks)
+
+    # Write into session state
+    try:
+        sess = await storage.get_session(user_id, agent_id, session_id)
+        if sess and sess.state:
+            sess.state.tasks_context = task_context
+            await storage.update_session_state(
+                user_id, agent_id, session_id, sess.state,
+            )
+        log.info(
+            "_seed_task_context: agent=%s tasks=%d (head+%d+tail)",
+            agent_id, len(tasks), len(dash_tasks),
+        )
+    except Exception as e:
+        log.warning("_seed_task_context failed: %s", e)
+
+    return len(tasks)
 
 
 # ── Team management ─────────────────────────────────

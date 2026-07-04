@@ -63,6 +63,67 @@ async def get_dashboard(
     return {"phases": by_phase, "total": len(tasks)}
 
 
+@router.get("/dashboard/tasks/{agent_id}")
+async def get_agent_task_context(
+    agent_id: str,
+    window_id: str = Query(default="", description="Window ID"),
+    project_path: str = Query(default=".", description="Project root path"),
+):
+    """Return the agent's TaskContext (plan-execute queue) + DASHBOARD tasks.
+
+    The TaskContext lives in Redis (AgentState.tasks_context) and shows
+    the worker's real-time execution plan with head/tail auto-injected.
+    The DASHBOARD tasks show project-level task metadata.
+    """
+    from main import app as _app
+    import hashlib
+
+    storage = getattr(_app.state, "storage", None)
+    if not storage:
+        return {"tasks": [], "dashboard_tasks": []}
+
+    project_hash = hashlib.md5(project_path.encode()).hexdigest()[:8]
+    user_id = f"openmox:{project_hash}"
+    session_id = f"{window_id}:{agent_id}"
+
+    result = {"tasks": [], "dashboard_tasks": []}
+
+    # Read TaskContext from Redis session state
+    try:
+        sess = await storage.get_session(user_id, agent_id, session_id)
+        if sess and sess.state and sess.state.tasks_context:
+            for t in sess.state.tasks_context.tasks:
+                result["tasks"].append({
+                    "id": t.id,
+                    "subject": t.subject,
+                    "description": t.description[:200] if t.description else "",
+                    "state": t.state,
+                    "metadata": t.metadata,
+                })
+    except Exception:
+        pass
+
+    # Read DASHBOARD tasks for this agent
+    try:
+        dao = DashboardDAO(project_path)
+        dash_tasks = dao.get_tasks_for_agent(agent_id, window_id)
+        for dt in dash_tasks:
+            result["dashboard_tasks"].append({
+                "id": dt.id,
+                "title": dt.title,
+                "status": dt.status,
+                "phase": dt.phase,
+                "owner": dt.owner,
+                "output": dt.output,
+                "depends_on": dt.depends_on,
+                "communication_budget": dt.communication_budget,
+            })
+    except Exception:
+        pass
+
+    return result
+
+
 @router.patch("/dashboard/{task_id}")
 async def update_task(
     task_id: str,

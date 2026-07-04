@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import { clsx } from "clsx";
+import { CaretDown } from "@phosphor-icons/react";
 import { getAgentColor } from "@/components/agents/AgentColorMap";
 import { Badge } from "@/components/ui/Badge";
+import { TaskDetailPanel } from "./TaskDetailPanel";
 import type { Task } from "@/lib/types";
 
 interface TaskCardProps {
@@ -29,6 +31,7 @@ export function TaskCard({ task, onDragStart }: TaskCardProps) {
   const status = statusConfig[task.status] || statusConfig.pending;
   const agentColor = getAgentColor(task.owner);
   const dragRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
 
   const handleDragStart = useCallback(
     (e: React.DragEvent) => {
@@ -108,6 +111,23 @@ export function TaskCard({ task, onDragStart }: TaskCardProps) {
           <span>depends on {task.depends_on.length}</span>
         </div>
       )}
+
+      {/* Expand/collapse toggle */}
+      {task.status === "in_progress" && (
+        <button
+          onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+          className="mt-2 flex items-center gap-1 text-[10px] text-text-muted hover:text-text-secondary transition-colors w-full"
+        >
+          <CaretDown
+            size={12}
+            className={clsx("transition-transform", expanded ? "rotate-0" : "-rotate-90")}
+          />
+          <span>{expanded ? "Hide progress" : "View progress"}</span>
+        </button>
+      )}
+
+      {/* Expandable detail panel */}
+      <TaskDetailPanel task={task} isOpen={expanded} />
     </div>
   );
 }

@@ -2,18 +2,27 @@
 
 import { useEffect, useRef, useCallback } from "react";
 import { useAppStore } from "@/stores/app";
-import type { ChatMessage } from "@/lib/types";
 
 const WS_URL = "ws://localhost:8000/ws";
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
 
 /**
- * WebSocket chat hook.
- * Full support for the OpenMox WebSocket protocol (PlanC/07).
+ * Hybrid chat hook: WebSocket (group chat + agent status) + SSE (agent internal events).
+ *
+ * WebSocket (/ws):
+ *   - human_message / agent_report → group chat bubbles
+ *   - agent:busy / agent:idle → agent status
+ *   - task_progress → task panel
+ *   - system_message → error / info toasts
+ *
+ * SSE (/api/sessions/{sid}/stream?agent_id={aid}):
+ *   - AgentScope native events (THINKING, TOOL_CALL, TOOL_RESULT, TEXT)
+ *   - Auto-started on agent:busy, auto-closed on agent:idle
  */
 export function useChat() {
   const wsRef = useRef<WebSocket | null>(null);
+  const sseRefs = useRef<Map<string, EventSource>>(new Map());
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
   const intentionalCloseRef = useRef(false);
@@ -23,14 +32,185 @@ export function useChat() {
     currentProject,
     currentProjectPath,
     addMessage,
-    appendToLastMessage,
-    appendThinkingToLastMessage,
-    setStreaming,
     setAgentStatus,
     updateWorkDetail,
     addToolCallToAgent,
+    addThinkingToAgent,
     setWsConnected,
+    addTaskProgress,
   } = store;
+
+  // ── SSE management ──────────────────────────────
+
+  const startSse = useCallback(
+    (agentId: string, sessionId: string) => {
+      // Close existing SSE for this agent
+      const existing = sseRefs.current.get(agentId);
+      if (existing) {
+        existing.close();
+      }
+
+      const projectPath = useAppStore.getState().currentProjectPath || ".";
+      const url = `/api/sessions/${encodeURIComponent(sessionId)}/stream?agent_id=${encodeURIComponent(agentId)}&project_path=${encodeURIComponent(projectPath)}`;
+      console.log(`[SSE] connecting ${agentId}: ${url}`);
+      const es = new EventSource(url);
+      sseRefs.current.set(agentId, es);
+
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          handleSseEvent(agentId, data);
+        } catch {
+          // ignore parse errors
+        }
+      };
+
+      es.onerror = () => {
+        console.log(`[SSE] ${agentId} connection error/closed`);
+        es.close();
+        sseRefs.current.delete(agentId);
+      };
+    },
+    [addToolCallToAgent, addThinkingToAgent, updateWorkDetail, addTaskProgress],
+  );
+
+  const stopSse = useCallback((agentId: string) => {
+    const es = sseRefs.current.get(agentId);
+    if (es) {
+      es.close();
+      sseRefs.current.delete(agentId);
+      console.log(`[SSE] ${agentId} closed`);
+    }
+  }, []);
+
+  const closeAllSse = useCallback(() => {
+    for (const [agentId, es] of sseRefs.current) {
+      es.close();
+    }
+    sseRefs.current.clear();
+  }, []);
+
+  // ── SSE event handler ───────────────────────────
+
+  const handleSseEvent = useCallback(
+    (agentId: string, data: any) => {
+      const etype = data.type || "?";
+
+      // Task panel progress events (from TaskPanelProjector)
+      if (etype === "task_progress" || data.name === "task_progress") {
+        addTaskProgress({
+          worker_session_id: data.worker_session_id || "",
+          worker_agent_id: data.worker_agent_id || agentId,
+          worker_agent_name: data.worker_agent_name || "",
+          reply_id: data.reply_id || "",
+          event_type: data.event_type || etype,
+          event_seq: data.event_seq || 0,
+          timestamp: (data.timestamp || data._timestamp || 0) * 1000,
+          delta: data.delta,
+          thinking_started: data.thinking_started,
+          thinking_ended: data.thinking_ended,
+          tool_name: data.tool_name || data.name,
+          tool_input: data.tool_input,
+          tool_state: data.tool_state || data.state,
+          tool_output: data.tool_output || data.output,
+          tool_result_started: data.tool_result_started,
+          summary: data.summary || data.text,
+        });
+        return;
+      }
+
+      // THINKING → agent work detail + task progress
+      if (etype === "THINKING_BLOCK_DELTA" && data.delta) {
+        addThinkingToAgent(agentId, data.delta);
+        addTaskProgress({
+          worker_session_id: "",
+          worker_agent_id: agentId,
+          worker_agent_name: "",
+          reply_id: "",
+          event_type: etype,
+          event_seq: 0,
+          timestamp: Date.now(),
+          delta: data.delta,
+        });
+        return;
+      }
+
+      if (etype === "THINKING_BLOCK_START") {
+        addTaskProgress({
+          worker_session_id: "", worker_agent_id: agentId,
+          worker_agent_name: "", reply_id: "",
+          event_type: etype, event_seq: 0, timestamp: Date.now(),
+          thinking_started: true,
+        });
+        return;
+      }
+
+      if (etype === "THINKING_BLOCK_END") {
+        addTaskProgress({
+          worker_session_id: "", worker_agent_id: agentId,
+          worker_agent_name: "", reply_id: "",
+          event_type: etype, event_seq: 0, timestamp: Date.now(),
+          thinking_ended: true,
+        });
+        return;
+      }
+
+      // TOOL_CALL → agent work detail + task progress
+      if (etype === "TOOL_CALL_END") {
+        const toolName = data.name || "tool";
+        addToolCallToAgent(agentId, {
+          name: toolName,
+          _timestamp: data._timestamp || Date.now(),
+        });
+        updateWorkDetail(agentId, { currentTask: `🔧 ${toolName}` });
+        addTaskProgress({
+          worker_session_id: "", worker_agent_id: agentId,
+          worker_agent_name: "", reply_id: "",
+          event_type: etype, event_seq: 0, timestamp: Date.now(),
+          tool_name: toolName,
+          tool_input: data.input,
+        });
+        return;
+      }
+
+      // TOOL_RESULT → agent work detail + task progress
+      if (etype === "TOOL_RESULT_END") {
+        const state = data.state;
+        addToolCallToAgent(agentId, {
+          name: data.name || "tool",
+          state: state,
+          _timestamp: data._timestamp || Date.now(),
+        });
+        const stateLabel = state === "success" ? "✅" : "❌";
+        updateWorkDetail(agentId, {
+          currentTask: `${stateLabel} ${data.name || "tool"}`,
+        });
+        addTaskProgress({
+          worker_session_id: "", worker_agent_id: agentId,
+          worker_agent_name: "", reply_id: "",
+          event_type: etype, event_seq: 0, timestamp: Date.now(),
+          tool_name: data.name || "tool",
+          tool_state: state,
+          tool_output: data.output,
+        });
+        return;
+      }
+
+      // TEXT → task progress summary
+      if (etype === "TEXT_BLOCK_END" && data.text) {
+        addTaskProgress({
+          worker_session_id: "", worker_agent_id: agentId,
+          worker_agent_name: "", reply_id: "",
+          event_type: etype, event_seq: 0, timestamp: Date.now(),
+          summary: data.text,
+        });
+        return;
+      }
+    },
+    [addToolCallToAgent, addThinkingToAgent, updateWorkDetail, addTaskProgress],
+  );
+
+  // ── WS message handler ──────────────────────────
 
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimerRef.current !== null) {
@@ -52,42 +232,59 @@ export function useChat() {
     }, delay);
   }, [clearReconnectTimer]);
 
-  const handleMessage = useCallback(
+  const handleWsMessage = useCallback(
     (data: any) => {
       const type = data.type;
       const agentId = data._agent_id;
 
-      // ── Handshake messages (ignore) ──
-      if (type === "config:reloaded" || type === "server_info") return;
+      // Handshake / heartbeat (ignore)
+      if (
+        type === "config:reloaded" ||
+        type === "server_info" ||
+        type === "session-status"
+      )
+        return;
 
-      // ── Session status (heartbeat) ──
-      if (type === "session-status") return;
-
-      // ── Agent status events ──
+      // ── Agent: busy → start SSE ──
       if (type === "agent:busy") {
         setAgentStatus(agentId || "unknown", "busy");
+        if (agentId && data.session_id) {
+          startSse(agentId, data.session_id);
+        }
         if (agentId) {
-          updateWorkDetail(agentId, {
-            currentTask: data._source || "Working...",
-          });
+          updateWorkDetail(agentId, { currentTask: "Working..." });
         }
         return;
       }
 
+      // ── Agent: idle → stop SSE ──
       if (type === "agent:idle") {
         setAgentStatus(agentId || "unknown", "idle");
-        // Reset work detail — agent has finished its current task
         if (agentId) {
+          stopSse(agentId);
           updateWorkDetail(agentId, { currentTask: undefined });
         }
         return;
       }
 
-      // ── Human message echo ──
+      // ── Human message ──
       if (type === "human_message") {
         addMessage({
           id: `user-${data._timestamp || Date.now()}`,
           sender: "user",
+          text: data.content || "",
+          timestamp: (data._timestamp || 0) * 1000,
+          events: [],
+        });
+        return;
+      }
+
+      // ── Agent report (from report_to_group tool) ──
+      if (type === "agent_report") {
+        const reportAgentId = data._agent_id || "assistant";
+        addMessage({
+          id: `report-${reportAgentId}-${data._timestamp || Date.now()}`,
+          sender: reportAgentId,
           text: data.content || "",
           timestamp: (data._timestamp || 0) * 1000,
           events: [],
@@ -108,101 +305,55 @@ export function useChat() {
       }
 
       // ── HINT_BLOCK (context seeding) ──
-      // These are internal context-seeding events from
-      // ContextSeedingMiddleware — they exist to seed agent
-      // memory, not for human display.  Silently consume them.
       if (type === "HINT_BLOCK") return;
 
-      // ── REPLY_START ──
-      if (type === "REPLY_START") {
-        setStreaming(true);
-        addMessage({
-          id: `reply-${data.reply_id}`,
-          sender: agentId || "assistant",
-          text: "",
-          timestamp: (data._timestamp || 0) * 1000,
-          events: [],
+      // ── Task progress (from projector, routed to window stream) ──
+      if (type === "task_progress") {
+        addTaskProgress({
+          worker_session_id: data.worker_session_id || "",
+          worker_agent_id: data.worker_agent_id || agentId || "unknown",
+          worker_agent_name: data.worker_agent_name || "",
+          reply_id: data.reply_id || "",
+          event_type: data.event_type || "UnknownEvent",
+          event_seq: data.event_seq || 0,
+          timestamp: (data.timestamp || data._timestamp || 0) * 1000,
+          delta: data.delta,
+          thinking_started: data.thinking_started,
+          thinking_ended: data.thinking_ended,
+          tool_name: data.tool_name,
+          tool_input: data.tool_input,
+          tool_state: data.tool_state,
+          tool_output: data.tool_output,
+          tool_result_started: data.tool_result_started,
+          summary: data.summary,
         });
         return;
       }
 
-      // ── TEXT_BLOCK_DELTA (incremental text) ──
-      if (type === "TEXT_BLOCK_DELTA" && data.delta) {
-        appendToLastMessage(agentId || "assistant", data.delta);
-        return;
-      }
+      // ── REPLY_START / REPLY_END (agent lifecycle, now via SSE) ──
+      // Silently consume — SSE handles actual content.
+      if (type === "REPLY_START" || type === "REPLY_END") return;
 
-      // ── THINKING_BLOCK_DELTA (reasoning, rendered as gray collapsible) ──
-      if (type === "THINKING_BLOCK_DELTA" && data.delta) {
-        appendThinkingToLastMessage(agentId || "assistant", data.delta);
-        return;
-      }
-
-      // ── TEXT_BLOCK_END / THINKING_BLOCK_END (no-op, transition markers) ──
+      // ── TEXT / THINKING deltas (now via SSE) ──
+      if (type === "TEXT_BLOCK_DELTA" || type === "THINKING_BLOCK_DELTA") return;
       if (type === "TEXT_BLOCK_END" || type === "THINKING_BLOCK_END") return;
 
-      // ── REPLY_END ──
-      if (type === "REPLY_END") {
-        setStreaming(false);
-        return;
-      }
-
-      // ── TOOL events ──
-      if (type === "TOOL_CALL_END") {
-        const toolName = data.name || "tool";
-        appendToLastMessage(agentId || "assistant", ` [🔧 ${toolName}] `);
-        // Populate agent work detail so AgentPanel can show active tool calls
-        if (agentId) {
-          addToolCallToAgent(agentId, {
-            name: toolName,
-            _source: data._source,
-            _timestamp: data._timestamp || Date.now(),
-          });
-          updateWorkDetail(agentId, { currentTask: `🔧 ${toolName}` });
-        }
-        return;
-      }
-
-      if (type === "TOOL_RESULT_END") {
-        const state = data.state;
-        if (state === "success") {
-          appendToLastMessage(agentId || "assistant", " ✅");
-        } else if (state === "error" || state === "denied") {
-          appendToLastMessage(agentId || "assistant", " ❌");
-        }
-        // Update work detail with tool result state
-        if (agentId) {
-          addToolCallToAgent(agentId, {
-            name: data.name || "tool",
-            state,
-            _source: data._source,
-            _timestamp: data._timestamp || Date.now(),
-          });
-          const stateLabel = state === "success" ? "✅" : "❌";
-          updateWorkDetail(agentId, { currentTask: `${stateLabel} ${data.name || "tool"}` });
-        }
-        return;
-      }
-
-      // ── EXCEED_MAX_ITERS ──
-      if (type === "EXCEED_MAX_ITERS") {
-        appendToLastMessage(agentId || "assistant", "\n\n⚠️ Agent 思考轮次过多，已中断。");
-        setStreaming(false);
-        return;
-      }
+      // ── TOOL events (now via SSE) ──
+      if (type === "TOOL_CALL_END" || type === "TOOL_RESULT_START" ||
+          type === "TOOL_RESULT_END") return;
     },
-    [addMessage, appendToLastMessage, appendThinkingToLastMessage, setStreaming,
-     setAgentStatus, updateWorkDetail, addToolCallToAgent, setWsConnected],
+    [addMessage, setAgentStatus, startSse, stopSse, updateWorkDetail, addTaskProgress],
   );
 
+  // ── WS connection ───────────────────────────────
+
   const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING)
+    if (
+      wsRef.current?.readyState === WebSocket.OPEN ||
+      wsRef.current?.readyState === WebSocket.CONNECTING
+    )
       return;
 
-    // Mute callbacks on the previous WebSocket so that its async events
-    // (onclose / onerror) cannot interfere with the new connection.
-    // This is essential in React StrictMode where the cleanup-effect
-    // cycle closes one socket right before the next connect() call.
     if (wsRef.current) {
       wsRef.current.onopen = null;
       wsRef.current.onclose = null;
@@ -222,7 +373,7 @@ export function useChat() {
 
     ws.onmessage = (event) => {
       try {
-        handleMessage(JSON.parse(event.data));
+        handleWsMessage(JSON.parse(event.data));
       } catch (e) {
         console.warn("[WS] parse error", e);
       }
@@ -231,9 +382,7 @@ export function useChat() {
     ws.onclose = () => {
       console.log("[WS] disconnected");
       setWsConnected(false);
-      // Only clear ref if it still points to this WebSocket.
-      // Prevents StrictMode double-mount races where a stale
-      // onclose handler clears a newer connection's reference.
+      closeAllSse();
       if (wsRef.current === ws) {
         wsRef.current = null;
       }
@@ -245,7 +394,7 @@ export function useChat() {
     ws.onerror = (e) => {
       console.error("[WS] error", e);
     };
-  }, [handleMessage, scheduleReconnect]);
+  }, [handleWsMessage, scheduleReconnect, setWsConnected, closeAllSse]);
 
   const sendMessage = useCallback(
     (command: string) => {
@@ -254,11 +403,8 @@ export function useChat() {
         return;
       }
       if (!currentWindowId) return;
-      // Resolve project path: prefer store value, fall back to
-      // currentProject.full_path, then to "." as last resort.
-      const cwd = currentProjectPath
-        || currentProject?.full_path
-        || ".";
+      const cwd =
+        currentProjectPath || currentProject?.full_path || ".";
 
       wsRef.current.send(
         JSON.stringify({
@@ -279,18 +425,19 @@ export function useChat() {
   const disconnect = useCallback(() => {
     intentionalCloseRef.current = true;
     clearReconnectTimer();
+    closeAllSse();
     wsRef.current?.close();
     wsRef.current = null;
-  }, [clearReconnectTimer]);
+  }, [clearReconnectTimer, closeAllSse]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       intentionalCloseRef.current = true;
       clearReconnectTimer();
+      closeAllSse();
       wsRef.current?.close();
     };
-  }, [clearReconnectTimer]);
+  }, [clearReconnectTimer, closeAllSse]);
 
   return { connect, sendMessage, disconnect };
 }

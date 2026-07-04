@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { motion } from "motion/react";
 import { clsx } from "clsx";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { CaretDown, Brain } from "@phosphor-icons/react";
 import { AgentAvatar } from "@/components/agents/AgentAvatar";
 import { getAgentColor } from "@/components/agents/AgentColorMap";
@@ -40,7 +42,7 @@ export function ChatBubble({ message, isStreaming }: ChatBubbleProps) {
       className={clsx("flex", isUser ? "justify-end" : "justify-start")}
     >
       {isUser ? (
-        <div className="max-w-[70%] rounded-2xl px-4 py-2.5 bg-bubble-user text-white text-sm leading-relaxed">
+        <div className="max-w-[70%] rounded-2xl px-4 py-2.5 bg-bubble-user text-white text-sm leading-relaxed whitespace-pre-wrap break-words">
           {message.text}
         </div>
       ) : isSystem ? (
@@ -96,9 +98,13 @@ export function ChatBubble({ message, isStreaming }: ChatBubbleProps) {
             </div>
           )}
 
-          {/* Main text */}
-          <div className="text-text-primary whitespace-pre-wrap break-words">
-            {message.text || (
+          {/* Main text — rendered as Markdown */}
+          <div className="text-text-primary break-words prose prose-sm dark:prose-invert max-w-none">
+            {message.text ? (
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {message.text}
+              </ReactMarkdown>
+            ) : (
               <span className="text-text-muted italic">thinking...</span>
             )}
           </div>

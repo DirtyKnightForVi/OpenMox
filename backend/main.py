@@ -114,7 +114,7 @@ async def lifespan(app: FastAPI):
         from agentscope.app._manager._background_task_manager import (
             BackgroundTaskManager,
         )
-        bg_manager = await stack.enter_async_context(BackgroundTaskManager())
+        bg_manager = await stack.enter_async_context(BackgroundTaskManager(message_bus=message_bus))
         app.state.background_task_manager = bg_manager
 
         # 5. ChatRunRegistry — per-process registry of in-flight chat-run tasks
@@ -140,6 +140,8 @@ async def lifespan(app: FastAPI):
             make_tools_factory,
             make_middleware_factory,
         )
+        from src.core.task_panel_projector import TaskPanelProjector
+        from src.core.agent_status_projector import AgentStatusProjector
         # Capture storage + message_bus in a closure so the tools factory
         # (which ChatService calls with only user_id/agent_id/session_id)
         # can pass them through to tool constructors.
@@ -155,6 +157,15 @@ async def lifespan(app: FastAPI):
             message_bus=message_bus,
             project_root=".",
         )
+        # TaskPanelProjector — mirrors worker internal events to leader
+        # session so the front-end task panel can render real-time progress.
+        task_panel_projector = TaskPanelProjector(storage=storage)
+
+        # AgentStatusProjector — publishes agent:busy/idle for workers
+        # invoked via WakeupDispatcher (bypasses _run_one). Without this
+        # the frontend never knows a worker started and won't open SSE.
+        agent_status_projector = AgentStatusProjector(message_bus=message_bus)
+
         chat_service = OpenMoxChatService(
             storage=storage,
             workspace_manager=workspace_manager,
@@ -163,6 +174,7 @@ async def lifespan(app: FastAPI):
             message_bus=message_bus,
             extra_agent_tools=tools_factory,
             extra_agent_middlewares=middleware_factory,
+            extra_projectors=[task_panel_projector, agent_status_projector],
         )
         app.state.chat_service = chat_service
         app.state.chat_run_registry = chat_run_registry

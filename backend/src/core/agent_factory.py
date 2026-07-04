@@ -162,6 +162,26 @@ class OnboardingMiddleware(MiddlewareBase):
                 )
                 if tasks:
                     additions.append(self._format_dashboard(tasks))
+                    # Add claim guidance for unclaimed ready tasks
+                    claimable = [
+                        t for t in tasks
+                        if t.status == "pending" and not t.depends_on
+                    ]
+                    if claimable:
+                        claim_lines = [
+                            "## ⚠️ 待认领任务",
+                            "以下任务已分配给你且前置依赖已满足，请立即认领：",
+                        ]
+                        for t in claimable[:5]:
+                            claim_lines.append(
+                                f"  · update_dashboard(\"{t.id}\", "
+                                f"status=\"in_progress\") — {t.title}"
+                            )
+                        claim_lines.append(
+                            "认领后在群聊中回复：\"我认领了任务「{任务名称}」"
+                            "({任务ID})，详情请见任务面板\""
+                        )
+                        additions.append("\n".join(claim_lines))
             except Exception:
                 pass  # dashboard unavailable → skip quietly
 

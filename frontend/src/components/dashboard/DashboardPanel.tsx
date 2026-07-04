@@ -4,6 +4,7 @@ import { useCallback } from "react";
 import { useSearchParams } from "next/navigation";
 import { TaskSkeleton } from "@/components/ui/Skeleton";
 import { PhaseColumn } from "./PhaseColumn";
+import { TaskProgressPanel } from "./TaskProgressPanel";
 import { updateDashboardTask } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
 import type { Task } from "@/lib/types";
@@ -94,6 +95,9 @@ export function DashboardPanel({ tasks, isLoading }: DashboardPanelProps) {
           ))}
         </div>
       )}
+
+      {/* Task progress — collapsible worker internal event streams */}
+      <TaskProgressPanel />
     </div>
   );
 }

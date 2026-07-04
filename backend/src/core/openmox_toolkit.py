@@ -13,6 +13,7 @@ from ..dao.dashboard_dao import DashboardDAO
 from .agent_factory import OnboardingMiddleware
 from .dashboard_tools import build_dashboard_tools
 from .agent_from_template_tool import AgentFromTemplateTool
+from .report_to_group_tool import ReportToGroup
 from ..memory.capture import MemoryCaptureMiddleware
 from ..permission.rules import build_permission_rules
 from .logging import get_logger
@@ -177,6 +178,17 @@ def make_tools_factory(
             except Exception:
                 pass
 
+        # ReportToGroup — ALL agents get this (primary way to speak in group chat)
+        try:
+            tools.append(ReportToGroup(
+                storage=storage, message_bus=message_bus,
+                user_id=user_id, session_id=session_id,
+                agent_id=agent_id, is_momo=is_momo,
+                project_root=project_path,
+            ))
+        except Exception:
+            pass
+
         log.info(
             "extra_tools factory: agent=%s session=%s project=%s tools=%d momo=%s",
             agent_id, session_id[:20], project_root, len(tools), is_momo,
@@ -217,11 +229,10 @@ def make_middleware_factory(
       2. OnboardingMiddleware — inject system_prompt + dashboard + memory
       3. MemoryCaptureMiddleware — extract memories on context compression
       4. CommunicationBudgetMiddleware — enforce peer-to-peer budget
-      5. WindowPublishMiddleware — publish public events → window stream
+      5. MemorySyncMiddleware — sync memories to MEMORY.md files
     """
 
     from .context_seeding_middleware import ContextSeedingMiddleware
-    from .window_publish_middleware import WindowPublishMiddleware
     from .communication_budget_middleware import CommunicationBudgetMiddleware
     from .memory_sync_middleware import MemorySyncMiddleware
 
@@ -275,11 +286,6 @@ def make_middleware_factory(
             MemorySyncMiddleware(
                 agent_id=agent_id,
                 project_root=proj_root,
-            ),
-            WindowPublishMiddleware(
-                message_bus=message_bus,
-                window_id=window_id,
-                agent_id=agent_id,
             ),
         ]
 
